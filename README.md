@@ -36,7 +36,7 @@ uv sync --extra dev
 
 Create a `.env` file in the project root:
 
-```
+```text
 GEMINI_API_KEY=your-api-key-here
 ```
 
@@ -114,7 +114,7 @@ result = run_defender(DefenderInput(
 
 ## Project Structure
 
-```
+```text
 src/defender/
 ├── __init__.py      # Top-level API: run_defender()
 ├── __main__.py      # CLI entry point
