@@ -1,19 +1,7 @@
-"""
-LLM prompt templates for the Defender agent.
-
-This module contains only string templates and prompt-building functions.
-No business logic lives here — the Defender class in defender.py
-consumes these prompts.
-"""
-
-from __future__ import annotations
+"""LLM prompt templates for the Defender agent."""
 
 from defender.strategies import STRATEGY_DESCRIPTIONS, RewriteStrategy
 
-
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
 You are the Defender agent in a multi-agent semantic anonymization system.
@@ -44,28 +32,13 @@ related details to match.
 )
 
 
-# ---------------------------------------------------------------------------
-# User prompt builder
-# ---------------------------------------------------------------------------
-
 def build_rewrite_prompt(
     text: str,
     target_attributes: list[str],
     iteration: int = 1,
     attacker_feedback: str | None = None,
 ) -> str:
-    """
-    Build the user message for the Defender's rewrite request.
-
-    Args:
-        text: The (possibly pre-masked) text to rewrite.
-        target_attributes: Attributes to hide.
-        iteration: Current retry iteration.
-        attacker_feedback: Attacker reasoning from a previous round (if any).
-
-    Returns:
-        The formatted user prompt string.
-    """
+    """Build the user message for the Defender's rewrite request."""
     attributes_list = "\n".join(f"  - {attr}" for attr in target_attributes)
 
     prompt = f"""\
@@ -125,10 +98,6 @@ extra text):
 
     return prompt
 
-
-# ---------------------------------------------------------------------------
-# Retry prompt (stricter formatting)
-# ---------------------------------------------------------------------------
 
 RETRY_PROMPT = """\
 Your previous response was not valid JSON. Please respond with ONLY a raw JSON \

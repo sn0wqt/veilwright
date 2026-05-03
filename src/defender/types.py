@@ -1,12 +1,4 @@
-"""
-Shared type definitions for the Defender agent.
-
-These types define the interface contract between the Defender,
-Attacker, and Utility Judge agents in the multi-agent semantic
-anonymization system.
-"""
-
-from __future__ import annotations
+"""Shared type definitions for the Defender agent."""
 
 from dataclasses import dataclass, field, asdict
 from typing import Any
@@ -14,24 +6,17 @@ from typing import Any
 
 @dataclass
 class StrategyRecord:
-    """
-    Record of which rewrite strategy was applied to a single target attribute.
-
-    Attributes:
-        attribute: The target attribute this record describes (e.g. "Age").
-        strategy: One of "abstraction", "shifting", or "omission".
-        reasoning: LLM's chain-of-thought reasoning for choosing this strategy.
-    """
+    """Record of which rewrite strategy was applied to a target attribute."""
 
     attribute: str
-    strategy: str  # "abstraction" | "shifting" | "omission"
+    strategy: str       # "abstraction" | "shifting" | "omission"
     reasoning: str
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> StrategyRecord:
+    def from_dict(cls, data: dict[str, Any]) -> "StrategyRecord":
         return cls(
             attribute=data["attribute"],
             strategy=data["strategy"],
@@ -41,16 +26,7 @@ class StrategyRecord:
 
 @dataclass
 class DefenderInput:
-    """
-    Input payload for the Defender agent.
-
-    Attributes:
-        text: The original sensitive text to anonymize.
-        target_attributes: List of attributes to hide (e.g. ["Age", "Birth Year"]).
-        iteration: Which retry iteration this is (loop counter from orchestrator).
-        attacker_feedback: Populated in later iterations with the Attacker's guess
-            and reasoning, so the Defender can adapt its strategy.
-    """
+    """Input payload for the Defender agent."""
 
     text: str
     target_attributes: list[str]
@@ -61,7 +37,7 @@ class DefenderInput:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> DefenderInput:
+    def from_dict(cls, data: dict[str, Any]) -> "DefenderInput":
         return cls(
             text=data["text"],
             target_attributes=data["target_attributes"],
@@ -72,18 +48,7 @@ class DefenderInput:
 
 @dataclass
 class DefenderOutput:
-    """
-    Output payload from the Defender agent.
-
-    Attributes:
-        original_text: The unmodified input text.
-        rewritten_text: Semantically rewritten text with target attributes obscured.
-        target_attributes: The attributes that were targeted for hiding.
-        strategies_used: Strategy records for each attribute.
-        confidence: Self-assessed confidence (0.0–1.0) that the rewrite is sufficient.
-        iteration: Which iteration produced this output.
-        syntactic_pii_found: Explicit PII tokens found by the syntactic scanner pass.
-    """
+    """Output payload from the Defender agent."""
 
     original_text: str
     rewritten_text: str
@@ -105,7 +70,7 @@ class DefenderOutput:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> DefenderOutput:
+    def from_dict(cls, data: dict[str, Any]) -> "DefenderOutput":
         return cls(
             original_text=data["original_text"],
             rewritten_text=data["rewritten_text"],
