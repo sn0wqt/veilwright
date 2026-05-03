@@ -56,7 +56,7 @@ def list_models() -> None:
     console.print()
 
 
-@app.command("run")
+@app.command("anonymize")
 def defend(
     text: str | None = typer.Option(
         None,
