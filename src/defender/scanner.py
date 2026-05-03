@@ -1,8 +1,10 @@
 """Syntactic PII scanner for the Defender agent.
 
-Detects and masks explicit PII tokens (names, locations, organizations,
-emails, phones, dates, credit cards) before the text goes to the LLM
-for semantic rewriting. Uses spaCy NER + regex patterns.
+Two-pass detection:
+  1. spaCy NER — detects names, locations, orgs, money (reported but NOT masked,
+     so the LLM can see them and reason about how to rewrite them)
+  2. Regex — detects emails, phones, dates, credit cards (masked before LLM
+     to prevent leaking raw PII to the API)
 """
 
 import re
@@ -27,6 +29,7 @@ class PIIMatch:
     start: int
     end: int
     replacement: str    # e.g. "<PERSON>"
+    mask: bool = True   # if False, detected but not masked in output
 
 
 @dataclass
@@ -112,10 +115,16 @@ def _is_valid_phone(value: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def scan_text(text: str) -> ScanResult:
-    """Scan free text for explicit PII and return a masked version."""
+    """Scan free text for PII and return a masked version.
+
+    NER entities (names, locations, orgs) are DETECTED but NOT masked —
+    the LLM needs to see them to know what to rewrite.
+    Regex entities (emails, phones, credit cards) are DETECTED AND masked —
+    we don't want to leak raw PII to the API.
+    """
     matches: list[PIIMatch] = []
 
-    # --- Pass 1: spaCy NER (names, locations, orgs, money) ---
+    # --- Pass 1: spaCy NER (detect only, don't mask) ---
     if _nlp is not None:
         doc = _nlp(text)
         for ent in doc.ents:
@@ -124,10 +133,10 @@ def scan_text(text: str) -> ScanResult:
                 matches.append(PIIMatch(
                     pii_type=pii_type, value=ent.text,
                     start=ent.start_char, end=ent.end_char,
-                    replacement=replacement,
+                    replacement=replacement, mask=False,
                 ))
 
-    # --- Pass 2: regex (emails, phones, dates, credit cards) ---
+    # --- Pass 2: regex (detect AND mask) ---
 
     # emails
     for m in _EMAIL_RE.finditer(text):
@@ -171,9 +180,13 @@ def scan_text(text: str) -> ScanResult:
     # deduplicate overlapping spans
     matches = _deduplicate_spans(matches)
 
-    # build masked text (replace from end to preserve indices)
+    # build masked text — only replace entities with mask=True
     masked = text
-    for match in sorted(matches, key=lambda m: m.start, reverse=True):
+    maskable = sorted(
+        [m for m in matches if m.mask],
+        key=lambda m: m.start, reverse=True,
+    )
+    for match in maskable:
         masked = masked[:match.start] + match.replacement + masked[match.end:]
 
     return ScanResult(pii_found=matches, masked_text=masked)

@@ -162,18 +162,27 @@ def _pretty_print(result, iteration: int, total: int) -> None:
     # syntactic PII
     if result.syntactic_pii_found:
         pii_table = Table(
-            title="Syntactic PII Detected (pre-masked before LLM)",
+            title="PII Detected by Scanner (NER + Regex)",
             show_header=True,
             header_style="bold magenta",
         )
         pii_table.add_column("#", style="dim", width=4)
         pii_table.add_column("Type", style="cyan")
         pii_table.add_column("Value", style="red")
+        pii_table.add_column("Action", style="yellow")
         for i, pii in enumerate(result.syntactic_pii_found, 1):
-            parts = pii.split(": ", 1)
+            # format: "TYPE: value [masked]" or "TYPE: value [detected]"
+            bracket_idx = pii.rfind(" [")
+            if bracket_idx != -1:
+                main_part = pii[:bracket_idx]
+                action = pii[bracket_idx + 2:-1]  # "masked" or "detected"
+            else:
+                main_part = pii
+                action = "?"
+            parts = main_part.split(": ", 1)
             pii_type = parts[0] if len(parts) == 2 else "PII"
-            pii_value = parts[1] if len(parts) == 2 else pii
-            pii_table.add_row(str(i), pii_type, pii_value)
+            pii_value = parts[1] if len(parts) == 2 else main_part
+            pii_table.add_row(str(i), pii_type, pii_value, action)
         console.print(pii_table)
         console.print()
 

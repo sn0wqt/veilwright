@@ -40,7 +40,10 @@ class Defender:
 
         # Step 1: syntactic scanner pass
         scan_result = scan_text(defender_input.text)
-        syntactic_pii = [f"{m.pii_type}: {m.value}" for m in scan_result.pii_found]
+        syntactic_pii = [
+            f"{m.pii_type}: {m.value} [{'masked' if m.mask else 'detected'}]"
+            for m in scan_result.pii_found
+        ]
 
         # use masked text for the LLM so we don't leak explicit PII
         text_for_llm = scan_result.masked_text
