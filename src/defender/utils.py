@@ -53,11 +53,13 @@ def validate_defender_response(data: dict) -> list[str]:
             for key in ("attribute", "strategy", "reasoning"):
                 if key not in record:
                     errors.append(f"strategies_used[{i}] missing '{key}'.")
-            if "strategy" in record and record["strategy"] not in VALID_STRATEGY_NAMES:
-                errors.append(
-                    f"strategies_used[{i}] has invalid strategy "
-                    f"'{record['strategy']}'. Must be one of {VALID_STRATEGY_NAMES}."
-                )
+            if "strategy" in record:
+                record["strategy"] = record["strategy"].lower()
+                if record["strategy"] not in VALID_STRATEGY_NAMES:
+                    errors.append(
+                        f"strategies_used[{i}] has invalid strategy "
+                        f"'{record['strategy']}'. Must be one of {VALID_STRATEGY_NAMES}."
+                    )
 
     if "confidence" not in data:
         errors.append("Missing 'confidence' field.")
