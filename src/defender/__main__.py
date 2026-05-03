@@ -5,13 +5,17 @@ Usage::
 
     python -m defender \\
       --text "I remember watching the moon landing..." \\
-      --attributes "Age" "Birth Year" "Exact Event" \\
-      --iterations 1
+      --attributes "Age" "Birth Year" "Exact Event"
+
+    python -m defender \\
+      --file input.txt \\
+      --attributes "Age" "Birth Year" "Exact Event"
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -34,10 +38,17 @@ console = Console()
 
 @app.command()
 def defend(
-    text: str = typer.Option(
-        ...,
+    text: str | None = typer.Option(
+        None,
         "--text", "-t",
-        help="The original sensitive text to anonymize.",
+        help="The sensitive text to anonymize (inline). Use --file for longer texts.",
+    ),
+    file: Path | None = typer.Option(
+        None,
+        "--file", "-f",
+        help="Path to a text file containing the sensitive text.",
+        exists=True,
+        readable=True,
     ),
     attributes: list[str] = typer.Option(
         ...,
@@ -63,7 +74,24 @@ def defend(
 ) -> None:
     """
     Run the Defender agent on the given text and target attributes.
+
+    Provide input via --text (inline) or --file (from file). Exactly one is required.
     """
+    # --- Resolve input text ---
+    if text and file:
+        console.print("[bold red]Error:[/bold red] Provide either --text or --file, not both.")
+        raise typer.Exit(code=1)
+    if not text and not file:
+        console.print("[bold red]Error:[/bold red] Provide either --text or --file.")
+        raise typer.Exit(code=1)
+
+    if file:
+        try:
+            text = file.read_text(encoding="utf-8")
+        except Exception as exc:
+            console.print(f"[bold red]Error reading file:[/bold red] {exc}")
+            raise typer.Exit(code=1)
+
     try:
         defender = Defender(model=model)
     except DefenderError as exc:
