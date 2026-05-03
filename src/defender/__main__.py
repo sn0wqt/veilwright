@@ -12,7 +12,9 @@ Usage::
 from __future__ import annotations
 
 import json
-import sys
+
+from dotenv import load_dotenv
+load_dotenv()
 
 import typer
 from rich.console import Console

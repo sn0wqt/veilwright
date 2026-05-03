@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from google import genai
 
 from defender.prompts import SYSTEM_PROMPT, RETRY_PROMPT, build_rewrite_prompt
