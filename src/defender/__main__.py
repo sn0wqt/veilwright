@@ -51,22 +51,24 @@ def list_models() -> None:
     client = genai.Client(api_key=api_key)
 
     console.print("\n[bold cyan]Available Gemini Models:[/bold cyan]\n")
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Model ID", style="green", min_width=30)
-    table.add_column("Display Name", style="white", min_width=30)
+
+    # Filter out non-text models (image, embedding, tts, robotics, etc.)
+    skip_keywords = {"embedding", "image", "tts", "robotics", "audio", "live", "banana"}
 
     try:
         for model in client.models.list():
             model_id = model.name or ""
-            display = model.display_name or ""
-            # Only show generative models (skip embedding etc.)
-            if "gemini" in model_id.lower():
-                table.add_row(model_id, display)
+            if "gemini" not in model_id.lower():
+                continue
+            if any(kw in model_id.lower() for kw in skip_keywords):
+                continue
+            # Strip the "models/" prefix
+            clean_id = model_id.removeprefix("models/")
+            console.print(f"  [green]{clean_id}[/green]")
     except Exception as exc:
         console.print(f"[bold red]API Error:[/bold red] {exc}")
         raise typer.Exit(code=1)
 
-    console.print(table)
     console.print()
 
 
