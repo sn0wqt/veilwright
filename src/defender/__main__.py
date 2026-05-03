@@ -70,7 +70,7 @@ def list_models() -> None:
     console.print()
 
 
-@app.command("defend")
+@app.command("run")
 def defend(
     text: str | None = typer.Option(
         None,

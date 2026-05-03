@@ -49,7 +49,7 @@ Get your API key from [Google AI Studio](https://aistudio.google.com/) → Get A
 defender --help
 
 # View help for a specific command
-defender defend --help
+defender run --help
 ```
 
 ### Defend (Anonymize Text)
@@ -57,25 +57,25 @@ defender defend --help
 Inline text:
 
 ```bash
-defender defend --text "I remember watching the moon landing with my father. It was a huge event to see Neil Armstrong become the first man on the Moon. Funnily enough, this is the only specific memory I have from when I was six years old." --attributes "Age,Birth Year,Exact Event"
+defender run --text "I remember watching the moon landing with my father. It was a huge event to see Neil Armstrong become the first man on the Moon. Funnily enough, this is the only specific memory I have from when I was six years old." --attributes "Age,Birth Year,Exact Event"
 ```
 
 From a file:
 
 ```bash
-defender defend --file input.txt --attributes "Age,Birth Year,Exact Event"
+defender run --file input.txt --attributes "Age,Birth Year,Exact Event"
 ```
 
 With a specific model:
 
 ```bash
-defender defend --text "..." --attributes "Age" --model gemini-2.5-pro
+defender run --text "..." --attributes "Age" --model gemini-2.5-pro
 ```
 
 JSON output (for machine-to-machine communication):
 
 ```bash
-defender defend --text "..." --attributes "Age" --json
+defender run --text "..." --attributes "Age" --json
 ```
 
 ### List Available Models
