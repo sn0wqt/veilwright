@@ -1,6 +1,26 @@
-# DataShield
+# Defender
 
-DataShield is a consistent data anonymization tool designed to help users manage and protect sensitive information. This project provides a set of utilities and models for data anonymization, ensuring that data privacy is maintained while allowing for data analysis and processing.
+The Defender agent — the anonymization component of a multi-agent semantic anonymization system. It rewrites free text to hide specific target attributes by neutralizing semantic clues that an LLM could exploit, while preserving the underlying meaning of the text.
+
+## System Overview
+
+This project is part of a three-agent adversarial system:
+
+1. **Defender** (this project) — rewrites text to hide target attributes
+2. **Attacker** — receives the rewritten text and tries to guess the hidden attributes
+3. **Utility Judge** — scores how much of the original meaning was preserved
+
+The system runs as an adversarial loop: if the Attacker guesses correctly, the Defender retries with a heavier rewrite, until the Attacker fails but the Utility Judge still gives a passing score.
+
+## How It Works
+
+The Defender uses a two-pass pipeline:
+
+1. **Syntactic scanner** — regex-based detection of explicit PII (emails, phone numbers, dates, credit card numbers, `<PERSON>` tags). These are masked before reaching the LLM.
+2. **Semantic rewriting** — a Gemini LLM applies one of three strategies per target attribute:
+   - **Abstraction** — replace specific clues with vaguer equivalents (e.g. "moon landing" → "historic space event")
+   - **Shifting** — replace clues with plausible but different references
+   - **Omission** — remove clues entirely (last resort)
 
 ## Installation
 
@@ -10,70 +30,106 @@ pip install uv
 
 # Sync dependencies
 uv sync --extra dev
+```
+
+## Configuration
+
+Create a `.env` file in the project root:
 
 ```
+GEMINI_API_KEY=your-api-key-here
+```
+
+Get your API key from [Google AI Studio](https://aistudio.google.com/) → Get API key.
 
 ## Usage
 
-DataShield operates via a command-line interface. You can append `--help` to any command to see all available options, arguments, and default values.
-
 ```bash
 # View all available commands
-datashield --help
+defender --help
 
-# View specific documentation for a single command
-datashield anonymize --help
-
+# View help for a specific command
+defender defend --help
 ```
 
-### Common Commands
+### Defend (Anonymize Text)
 
-Initialize the SQLite database tables:
+Inline text:
 
 ```bash
-datashield init-db --db-path datashield.db
-
+defender defend --text "I remember watching the moon landing with my father. It was a huge event to see Neil Armstrong become the first man on the Moon. Funnily enough, this is the only specific memory I have from when I was six years old." --attributes "Age,Birth Year,Exact Event"
 ```
 
-Run a health check on the database connection:
+From a file:
 
 ```bash
-datashield check --db-path datashield.db
-
+defender defend --file input.txt --attributes "Age,Birth Year,Exact Event"
 ```
 
-Seed the database with a specific number of test users:
+With a specific model:
 
 ```bash
-datashield seed --count 50 --db-path datashield.db
-
+defender defend --text "..." --attributes "Age" --model gemini-2.5-pro
 ```
 
-Scan the database for PII columns and generate a report:
+JSON output (for machine-to-machine communication):
 
 ```bash
-datashield scan --db-path datashield.db --show-all
-
+defender defend --text "..." --attributes "Age" --json
 ```
 
-Anonymize the detected PII in the database:
+### List Available Models
 
 ```bash
-datashield anonymize --db-path datashield.db --output anonymized.db --aggressive
-
+defender models
 ```
 
-Run a dry-run to see an anonymization plan without making any actual changes:
+## Python API
 
-```bash
-datashield anonymize --db-path datashield.db --dry-run
+The Defender exposes a clean interface for integration with the Attacker and Utility Judge:
 
+```python
+from defender import run_defender, DefenderInput
+
+result = run_defender(DefenderInput(
+    text="I remember watching the moon landing...",
+    target_attributes=["Age", "Birth Year", "Exact Event"],
+))
+
+print(result.rewritten_text)
+print(result.strategies_used)
+print(result.confidence)
+```
+
+For the adversarial loop (with Attacker feedback):
+
+```python
+result = run_defender(DefenderInput(
+    text="I remember watching the moon landing...",
+    target_attributes=["Age", "Birth Year"],
+    iteration=2,
+    attacker_feedback="The narrator watched the moon landing at age 6, so born ~1963.",
+))
+```
+
+## Project Structure
+
+```
+src/defender/
+├── __init__.py      # Top-level API: run_defender()
+├── __main__.py      # CLI entry point
+├── defender.py      # Core pipeline: scanner → LLM → parse
+├── prompts.py       # System prompt, user prompt builder, retry prompt
+├── scanner.py       # Regex-based PII detection + masking
+├── strategies.py    # RewriteStrategy enum + descriptions
+├── types.py         # DefenderInput, DefenderOutput, StrategyRecord
+└── utils.py         # JSON extraction + response validation
 ```
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a pull request or open an issue for any enhancements or bug fixes.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for more details.
+MIT — see [LICENSE.md](LICENSE.md).

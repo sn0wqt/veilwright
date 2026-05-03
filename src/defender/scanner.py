@@ -5,10 +5,6 @@ Performs a first-pass scan over free text to detect and mask explicit PII
 tokens (emails, phone numbers, dates, credit card numbers) before the text
 is sent to the LLM for semantic rewriting. This reduces token leakage and
 lets the LLM focus on semantic clues only.
-
-Adapted from the DataShield project's SensitiveDataScanner — regex patterns
-and phone validation logic are reused; all database/column-level logic has
-been removed.
 """
 
 from __future__ import annotations
@@ -58,7 +54,7 @@ class ScanResult:
 
 
 # ---------------------------------------------------------------------------
-# Compiled regex patterns (adapted from datashield/scanner.py)
+# Compiled regex patterns
 # ---------------------------------------------------------------------------
 
 # Email: standard addr-spec pattern
@@ -98,7 +94,7 @@ _PERSON_TAG_RE = re.compile(r"<PERSON>")
 
 
 # ---------------------------------------------------------------------------
-# Luhn check (from datashield/scanner.py)
+# Luhn check
 # ---------------------------------------------------------------------------
 
 def _luhn_check(card_number: str) -> bool:
@@ -124,7 +120,7 @@ def _luhn_check(card_number: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Phone validation (from datashield/scanner.py)
+# Phone validation
 # ---------------------------------------------------------------------------
 
 def _is_valid_phone(value: str) -> bool:
