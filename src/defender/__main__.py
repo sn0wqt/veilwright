@@ -50,10 +50,10 @@ def defend(
         exists=True,
         readable=True,
     ),
-    attributes: list[str] = typer.Option(
+    attributes: str = typer.Option(
         ...,
         "--attributes", "-a",
-        help="Target attributes to hide (repeat for multiple).",
+        help='Comma-separated target attributes to hide (e.g. "Age,Birth Year,Exact Event").',
     ),
     iterations: int = typer.Option(
         1,
@@ -92,6 +92,12 @@ def defend(
             console.print(f"[bold red]Error reading file:[/bold red] {exc}")
             raise typer.Exit(code=1)
 
+    # --- Parse attributes ---
+    attr_list = [a.strip() for a in attributes.split(",") if a.strip()]
+    if not attr_list:
+        console.print("[bold red]Error:[/bold red] No attributes provided.")
+        raise typer.Exit(code=1)
+
     try:
         defender = Defender(model=model)
     except DefenderError as exc:
@@ -103,7 +109,7 @@ def defend(
     for iteration in range(1, iterations + 1):
         defender_input = DefenderInput(
             text=text,
-            target_attributes=attributes,
+            target_attributes=attr_list,
             iteration=iteration,
             attacker_feedback=attacker_feedback,
         )
@@ -129,13 +135,13 @@ def _pretty_print(result, iteration: int, total_iterations: int) -> None:
     """Render a DefenderOutput with rich formatting."""
     console.print()
     console.rule(
-        f"[bold cyan]Defender Output — Iteration {iteration}/{total_iterations}[/bold cyan]"
+        f"[bold cyan]Defender Output - Iteration {iteration}/{total_iterations}[/bold cyan]"
     )
 
     # --- Syntactic PII ---
     if result.syntactic_pii_found:
         pii_table = Table(
-            title="🔍 Syntactic PII Detected (pre-masked before LLM)",
+            title="[SCAN] Syntactic PII Detected (pre-masked before LLM)",
             show_header=True,
             header_style="bold magenta",
         )
@@ -152,7 +158,7 @@ def _pretty_print(result, iteration: int, total_iterations: int) -> None:
 
     # --- Strategies ---
     strat_table = Table(
-        title="🛡️  Rewrite Strategies",
+        title="[DEFEND] Rewrite Strategies",
         show_header=True,
         header_style="bold magenta",
     )
