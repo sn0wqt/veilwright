@@ -1,25 +1,11 @@
-"""
-CLI entry point for the Defender agent.
-
-Usage::
-
-    python -m defender \\
-      --text "I remember watching the moon landing..." \\
-      --attributes "Age" "Birth Year" "Exact Event"
-
-    python -m defender \\
-      --file input.txt \\
-      --attributes "Age" "Birth Year" "Exact Event"
-"""
-
-from __future__ import annotations
+"""CLI entry point for the Defender agent."""
 
 import json
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-load_dotenv()
+from google import genai
 
 import typer
 from rich.console import Console
@@ -28,6 +14,8 @@ from rich.table import Table
 
 from defender.defender import Defender, DefenderError
 from defender.types import DefenderInput
+
+load_dotenv()
 
 app = typer.Typer(
     name="defender",
@@ -40,9 +28,6 @@ console = Console()
 @app.command("models")
 def list_models() -> None:
     """List available Gemini models that can be used with --model."""
-    import os
-    from google import genai
-
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         console.print("[bold red]Error:[/bold red] GEMINI_API_KEY not set in .env")
@@ -52,7 +37,7 @@ def list_models() -> None:
 
     console.print("\n[bold cyan]Available Gemini Models:[/bold cyan]\n")
 
-    # Filter out non-text models (image, embedding, tts, robotics, etc.)
+    # skip non-text models
     skip_keywords = {"embedding", "image", "tts", "robotics", "audio", "live", "banana"}
 
     try:
@@ -62,7 +47,6 @@ def list_models() -> None:
                 continue
             if any(kw in model_id.lower() for kw in skip_keywords):
                 continue
-            # Strip the "models/" prefix
             clean_id = model_id.removeprefix("models/")
             console.print(f"  [green]{clean_id}[/green]")
     except Exception as exc:
@@ -72,7 +56,7 @@ def list_models() -> None:
     console.print()
 
 
-@app.command("run")
+@app.command("anonymize")
 def defend(
     text: str | None = typer.Option(
         None,
@@ -113,12 +97,9 @@ def defend(
         help="Output raw JSON instead of pretty-printed results.",
     ),
 ) -> None:
-    """
-    Run the Defender agent on the given text and target attributes.
+    """Run the Defender agent on the given text and target attributes."""
 
-    Provide input via --text (inline) or --file (from file). Exactly one is required.
-    """
-    # --- Resolve input text ---
+    # resolve input text
     if text and file:
         console.print(
             "[bold red]Error:[/bold red] Provide either --text or --file, not both."
@@ -135,7 +116,7 @@ def defend(
             console.print(f"[bold red]Error reading file:[/bold red] {exc}")
             raise typer.Exit(code=1)
 
-    # --- Parse attributes ---
+    # parse attributes
     attr_list = [a.strip() for a in attributes.split(",") if a.strip()]
     if not attr_list:
         console.print("[bold red]Error:[/bold red] No attributes provided.")
@@ -168,23 +149,20 @@ def defend(
         else:
             _pretty_print(result, iteration, iterations)
 
-        # In a full system, the Attacker would evaluate here and provide
-        # feedback; for now, use the previous rewrite as input for the
-        # next iteration.
+        # in a full system the Attacker would evaluate here;
+        # for now just feed the previous rewrite into the next iteration
         text = result.rewritten_text
 
 
-def _pretty_print(result, iteration: int, total_iterations: int) -> None:
+def _pretty_print(result, iteration: int, total: int) -> None:
     """Render a DefenderOutput with rich formatting."""
     console.print()
-    console.rule(
-        f"[bold cyan]Defender Output — Iteration {iteration}/{total_iterations}[/bold cyan]"
-    )
+    console.rule(f"[bold cyan]Defender Output - Iteration {iteration}/{total}[/bold cyan]")
 
-    # --- Syntactic PII ---
+    # syntactic PII
     if result.syntactic_pii_found:
         pii_table = Table(
-            title="🔍 Syntactic PII Detected (pre-masked before LLM)",
+            title="Syntactic PII Detected (pre-masked before LLM)",
             show_header=True,
             header_style="bold magenta",
         )
@@ -199,21 +177,21 @@ def _pretty_print(result, iteration: int, total_iterations: int) -> None:
         console.print(pii_table)
         console.print()
 
-    # --- Strategies ---
-    strat_table = Table(
-        title="🛡️  Rewrite Strategies",
+    # strategies
+    strategy_table = Table(
+        title="Rewrite Strategies",
         show_header=True,
         header_style="bold magenta",
     )
-    strat_table.add_column("Attribute", style="cyan", min_width=15)
-    strat_table.add_column("Strategy", style="green", min_width=12)
-    strat_table.add_column("Reasoning", style="white", max_width=80)
+    strategy_table.add_column("Attribute", style="cyan", min_width=15)
+    strategy_table.add_column("Strategy", style="green", min_width=12)
+    strategy_table.add_column("Reasoning", style="white", max_width=80)
     for s in result.strategies_used:
-        strat_table.add_row(s.attribute, s.strategy, s.reasoning)
-    console.print(strat_table)
+        strategy_table.add_row(s.attribute, s.strategy, s.reasoning)
+    console.print(strategy_table)
     console.print()
 
-    # --- Rewritten text ---
+    # rewritten text
     console.print(
         Panel(
             result.rewritten_text,
@@ -223,19 +201,14 @@ def _pretty_print(result, iteration: int, total_iterations: int) -> None:
         )
     )
 
-    # --- Confidence ---
-    confidence_pct = result.confidence * 100
-    color = (
-        "green" if confidence_pct >= 80 else "yellow" if confidence_pct >= 50 else "red"
-    )
-    console.print(
-        f"\n[bold]Confidence:[/bold] [{color}]{confidence_pct:.0f}%[/{color}]"
-    )
+    # confidence
+    pct = result.confidence * 100
+    color = "green" if pct >= 80 else "yellow" if pct >= 50 else "red"
+    console.print(f"\n[bold]Confidence:[/bold] [{color}]{pct:.0f}%[/{color}]")
     console.print()
 
 
 def main() -> None:
-    """Entry point for the ``defender`` console script."""
     app()
 
 

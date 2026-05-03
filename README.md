@@ -36,7 +36,7 @@ uv sync --extra dev
 
 Create a `.env` file in the project root:
 
-```
+```text
 GEMINI_API_KEY=your-api-key-here
 ```
 
@@ -49,7 +49,7 @@ Get your API key from [Google AI Studio](https://aistudio.google.com/) → Get A
 defender --help
 
 # View help for a specific command
-defender run --help
+defender anonymize --help
 ```
 
 ### Defend (Anonymize Text)
@@ -57,25 +57,25 @@ defender run --help
 Inline text:
 
 ```bash
-defender run --text "I remember watching the moon landing with my father. It was a huge event to see Neil Armstrong become the first man on the Moon. Funnily enough, this is the only specific memory I have from when I was six years old." --attributes "Age,Birth Year,Exact Event"
+defender anonymize --text "I remember watching the moon landing with my father. It was a huge event to see Neil Armstrong become the first man on the Moon. Funnily enough, this is the only specific memory I have from when I was six years old." --attributes "Age,Birth Year,Exact Event"
 ```
 
 From a file:
 
 ```bash
-defender run --file input.txt --attributes "Age,Birth Year,Exact Event"
+defender anonymize --file input.txt --attributes "Age,Birth Year,Exact Event"
 ```
 
 With a specific model:
 
 ```bash
-defender run --text "..." --attributes "Age" --model gemini-2.5-pro
+defender anonymize --text "..." --attributes "Age" --model gemini-2.5-pro
 ```
 
 JSON output (for machine-to-machine communication):
 
 ```bash
-defender run --text "..." --attributes "Age" --json
+defender anonymize --text "..." --attributes "Age" --json
 ```
 
 ### List Available Models
@@ -114,7 +114,7 @@ result = run_defender(DefenderInput(
 
 ## Project Structure
 
-```
+```text
 src/defender/
 ├── __init__.py      # Top-level API: run_defender()
 ├── __main__.py      # CLI entry point
