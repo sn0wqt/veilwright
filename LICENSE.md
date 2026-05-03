@@ -1,6 +1,6 @@
-MIT License
+# MIT License
 
-Copyright (c) 2026 Rasul Asaad, Dimitri Virginia, and Hatab Ramadan
+Copyright (c) 2026 Rasul Asaad
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
