@@ -24,7 +24,7 @@ def run_defender(defender_input: DefenderInput) -> DefenderOutput:
     Top-level convenience function for the orchestrator.
 
     Creates a :class:`Defender` instance (reading the API key from the
-    ``ANTHROPIC_API_KEY`` environment variable) and runs the full pipeline.
+    ``GEMINI_API_KEY`` environment variable) and runs the full pipeline.
 
     Args:
         defender_input: Input payload with text and target attributes.

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 
-import anthropic
+from google import genai
 
 from defender.prompts import SYSTEM_PROMPT, RETRY_PROMPT, build_rewrite_prompt
 from defender.scanner import scan_text
@@ -29,18 +29,18 @@ class Defender:
     Pipeline:
         1. Run the syntactic scanner to detect and mask explicit PII.
         2. Build a chain-of-thought prompt for the LLM.
-        3. Call the Anthropic API and parse the structured JSON response.
+        3. Call the Gemini API and parse the structured JSON response.
         4. Retry once with a stricter prompt if JSON parsing fails.
 
     Args:
-        api_key: Anthropic API key. Falls back to ``ANTHROPIC_API_KEY`` env var.
+        api_key: Gemini API key. Falls back to ``GEMINI_API_KEY`` env var.
         model: Model identifier to use.
 
     Raises:
         DefenderError: If no API key is available.
     """
 
-    DEFAULT_MODEL = "claude-opus-4-5"
+    DEFAULT_MODEL = "gemini-2.5-flash"
     MAX_TOKENS = 4096
 
     def __init__(
@@ -48,15 +48,15 @@ class Defender:
         api_key: str | None = None,
         model: str | None = None,
     ) -> None:
-        resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not resolved_key:
             raise DefenderError(
-                "No Anthropic API key provided. Set the ANTHROPIC_API_KEY "
+                "No Gemini API key provided. Set the GEMINI_API_KEY "
                 "environment variable or pass api_key= to the Defender constructor."
             )
 
         self.model = model or self.DEFAULT_MODEL
-        self._client = anthropic.Anthropic(api_key=resolved_key)
+        self._client = genai.Client(api_key=resolved_key)
 
     # ------------------------------------------------------------------
     # Public API
@@ -93,8 +93,8 @@ class Defender:
         )
 
         # --- Step 3: Call the LLM ---
-        messages = [{"role": "user", "content": user_prompt}]
-        llm_response_text = self._call_llm(messages)
+        contents = [user_prompt]
+        llm_response_text = self._call_llm(contents)
 
         # --- Step 4: Parse and validate ---
         try:
@@ -108,9 +108,9 @@ class Defender:
                 )
         except json.JSONDecodeError:
             # --- Step 5: Retry once with stricter prompt ---
-            messages.append({"role": "assistant", "content": llm_response_text})
-            messages.append({"role": "user", "content": RETRY_PROMPT})
-            retry_text = self._call_llm(messages)
+            contents.append(llm_response_text)  # model's previous reply
+            contents.append(RETRY_PROMPT)
+            retry_text = self._call_llm(contents)
 
             try:
                 parsed = parse_llm_json(retry_text)
@@ -143,27 +143,29 @@ class Defender:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _call_llm(self, messages: list[dict]) -> str:
+    def _call_llm(self, contents: list[str]) -> str:
         """
-        Send messages to the Anthropic API and return the text response.
+        Send contents to the Gemini API and return the text response.
 
         Args:
-            messages: Conversation messages in Anthropic format.
+            contents: Conversation contents as a list of strings.
 
         Returns:
-            The assistant's text response.
+            The model's text response.
 
         Raises:
             DefenderError: On API errors.
         """
         try:
-            response = self._client.messages.create(
+            response = self._client.models.generate_content(
                 model=self.model,
-                max_tokens=self.MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                messages=messages,
+                contents=contents,
+                config={
+                    "system_instruction": SYSTEM_PROMPT,
+                    "max_output_tokens": self.MAX_TOKENS,
+                    "temperature": 0.7,
+                },
             )
-            # Extract text from the first content block
-            return response.content[0].text
-        except anthropic.APIError as exc:
-            raise DefenderError(f"Anthropic API error: {exc}") from exc
+            return response.text
+        except Exception as exc:
+            raise DefenderError(f"Gemini API error: {exc}") from exc

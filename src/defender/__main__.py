@@ -49,9 +49,9 @@ def defend(
         min=1,
     ),
     model: str = typer.Option(
-        "claude-opus-4-5",
+        "gemini-2.5-flash",
         "--model", "-m",
-        help="Anthropic model to use.",
+        help="Gemini model to use (e.g. gemini-2.5-flash, gemini-2.5-pro).",
     ),
     output_json: bool = typer.Option(
         False,
