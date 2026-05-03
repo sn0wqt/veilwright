@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 import typer
@@ -36,34 +37,72 @@ app = typer.Typer(
 console = Console()
 
 
-@app.command()
+@app.command("models")
+def list_models() -> None:
+    """List available Gemini models that can be used with --model."""
+    import os
+    from google import genai
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        console.print("[bold red]Error:[/bold red] GEMINI_API_KEY not set in .env")
+        raise typer.Exit(code=1)
+
+    client = genai.Client(api_key=api_key)
+
+    console.print("\n[bold cyan]Available Gemini Models:[/bold cyan]\n")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Model ID", style="green", min_width=30)
+    table.add_column("Display Name", style="white", min_width=30)
+
+    try:
+        for model in client.models.list():
+            model_id = model.name or ""
+            display = model.display_name or ""
+            # Only show generative models (skip embedding etc.)
+            if "gemini" in model_id.lower():
+                table.add_row(model_id, display)
+    except Exception as exc:
+        console.print(f"[bold red]API Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    console.print(table)
+    console.print()
+
+
+@app.command("defend")
 def defend(
     text: str | None = typer.Option(
         None,
-        "--text", "-t",
+        "--text",
+        "-t",
         help="The sensitive text to anonymize (inline). Use --file for longer texts.",
     ),
     file: Path | None = typer.Option(
         None,
-        "--file", "-f",
+        "--file",
+        "-f",
         help="Path to a text file containing the sensitive text.",
         exists=True,
         readable=True,
     ),
     attributes: str = typer.Option(
         ...,
-        "--attributes", "-a",
+        "--attributes",
+        "-a",
         help='Comma-separated target attributes to hide (e.g. "Age,Birth Year,Exact Event").',
     ),
     iterations: int = typer.Option(
         1,
-        "--iterations", "-n",
+        "--iterations",
+        "-n",
         help="Number of defender iterations to run.",
         min=1,
     ),
     model: str = typer.Option(
         "gemini-2.5-flash",
-        "--model", "-m",
+        "--model",
+        "-m",
         help="Gemini model to use (e.g. gemini-2.5-flash, gemini-2.5-pro).",
     ),
     output_json: bool = typer.Option(
@@ -79,7 +118,9 @@ def defend(
     """
     # --- Resolve input text ---
     if text and file:
-        console.print("[bold red]Error:[/bold red] Provide either --text or --file, not both.")
+        console.print(
+            "[bold red]Error:[/bold red] Provide either --text or --file, not both."
+        )
         raise typer.Exit(code=1)
     if not text and not file:
         console.print("[bold red]Error:[/bold red] Provide either --text or --file.")
@@ -135,13 +176,13 @@ def _pretty_print(result, iteration: int, total_iterations: int) -> None:
     """Render a DefenderOutput with rich formatting."""
     console.print()
     console.rule(
-        f"[bold cyan]Defender Output - Iteration {iteration}/{total_iterations}[/bold cyan]"
+        f"[bold cyan]Defender Output — Iteration {iteration}/{total_iterations}[/bold cyan]"
     )
 
     # --- Syntactic PII ---
     if result.syntactic_pii_found:
         pii_table = Table(
-            title="[SCAN] Syntactic PII Detected (pre-masked before LLM)",
+            title="🔍 Syntactic PII Detected (pre-masked before LLM)",
             show_header=True,
             header_style="bold magenta",
         )
@@ -158,7 +199,7 @@ def _pretty_print(result, iteration: int, total_iterations: int) -> None:
 
     # --- Strategies ---
     strat_table = Table(
-        title="[DEFEND] Rewrite Strategies",
+        title="🛡️  Rewrite Strategies",
         show_header=True,
         header_style="bold magenta",
     )
@@ -171,16 +212,20 @@ def _pretty_print(result, iteration: int, total_iterations: int) -> None:
     console.print()
 
     # --- Rewritten text ---
-    console.print(Panel(
-        result.rewritten_text,
-        title="[bold green]Rewritten Text[/bold green]",
-        border_style="green",
-        padding=(1, 2),
-    ))
+    console.print(
+        Panel(
+            result.rewritten_text,
+            title="[bold green]Rewritten Text[/bold green]",
+            border_style="green",
+            padding=(1, 2),
+        )
+    )
 
     # --- Confidence ---
     confidence_pct = result.confidence * 100
-    color = "green" if confidence_pct >= 80 else "yellow" if confidence_pct >= 50 else "red"
+    color = (
+        "green" if confidence_pct >= 80 else "yellow" if confidence_pct >= 50 else "red"
+    )
     console.print(
         f"\n[bold]Confidence:[/bold] [{color}]{confidence_pct:.0f}%[/{color}]"
     )
