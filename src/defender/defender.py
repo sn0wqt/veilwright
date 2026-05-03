@@ -22,7 +22,7 @@ class Defender:
     """Rewrites free text to hide target attributes using a syntactic + LLM pipeline."""
 
     DEFAULT_MODEL = "gemini-2.5-flash"
-    MAX_TOKENS = 4096
+    MAX_TOKENS = 16384
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -110,6 +110,14 @@ class Defender:
                     "temperature": 0.7,
                 },
             )
-            return response.text
+            text = response.text
+            if not text:
+                raise DefenderError(
+                    "Gemini returned an empty response. The input may be too "
+                    "long or the content may have been blocked."
+                )
+            return text
+        except DefenderError:
+            raise
         except Exception as exc:
             raise DefenderError(f"Gemini API error: {exc}") from exc

@@ -13,6 +13,7 @@ dependencies = [
     "rich>=13.0.0",
     "typer>=0.15.0",
     "phonenumbers>=9.0.23",
+    "spacy>=3.8.13",
 ]
 
 [project.scripts]

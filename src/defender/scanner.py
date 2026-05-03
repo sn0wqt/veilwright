@@ -1,7 +1,8 @@
 """Syntactic PII scanner for the Defender agent.
 
-Detects and masks explicit PII tokens (emails, phones, dates, credit cards)
-before the text goes to the LLM for semantic rewriting.
+Detects and masks explicit PII tokens (names, locations, organizations,
+emails, phones, dates, credit cards) before the text goes to the LLM
+for semantic rewriting. Uses spaCy NER + regex patterns.
 """
 
 import re
@@ -9,16 +10,23 @@ from dataclasses import dataclass, field
 
 import phonenumbers
 
+# load spaCy model (with graceful fallback)
+try:
+    import spacy
+    _nlp = spacy.load("en_core_web_sm")
+except (ImportError, OSError):
+    _nlp = None
+
 
 @dataclass
 class PIIMatch:
     """A single PII token found in the input text."""
 
-    pii_type: str       # e.g. "EMAIL", "PHONE", "DATE", "CREDIT_CARD", "PERSON"
+    pii_type: str       # e.g. "PERSON", "EMAIL", "PHONE", "LOCATION", etc.
     value: str
     start: int
     end: int
-    replacement: str    # e.g. "<EMAIL>"
+    replacement: str    # e.g. "<PERSON>"
 
 
 @dataclass
@@ -30,7 +38,7 @@ class ScanResult:
 
 
 # ---------------------------------------------------------------------------
-# Regex patterns
+# Regex patterns (for things spaCy can't catch)
 # ---------------------------------------------------------------------------
 
 _EMAIL_RE = re.compile(
@@ -60,6 +68,16 @@ _PHONE_CANDIDATE_RE = re.compile(
 )
 
 _PERSON_TAG_RE = re.compile(r"<PERSON>")
+
+
+# spaCy entity label -> our PII type + replacement tag
+_NER_LABEL_MAP: dict[str, tuple[str, str]] = {
+    "PERSON":  ("PERSON", "<PERSON>"),
+    "GPE":     ("LOCATION", "<LOCATION>"),
+    "LOC":     ("LOCATION", "<LOCATION>"),
+    "ORG":     ("ORGANIZATION", "<ORGANIZATION>"),
+    "MONEY":   ("MONEY", "<MONEY>"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +115,20 @@ def scan_text(text: str) -> ScanResult:
     """Scan free text for explicit PII and return a masked version."""
     matches: list[PIIMatch] = []
 
+    # --- Pass 1: spaCy NER (names, locations, orgs, money) ---
+    if _nlp is not None:
+        doc = _nlp(text)
+        for ent in doc.ents:
+            if ent.label_ in _NER_LABEL_MAP:
+                pii_type, replacement = _NER_LABEL_MAP[ent.label_]
+                matches.append(PIIMatch(
+                    pii_type=pii_type, value=ent.text,
+                    start=ent.start_char, end=ent.end_char,
+                    replacement=replacement,
+                ))
+
+    # --- Pass 2: regex (emails, phones, dates, credit cards) ---
+
     # emails
     for m in _EMAIL_RE.finditer(text):
         matches.append(PIIMatch(
@@ -113,7 +145,7 @@ def scan_text(text: str) -> ScanResult:
                 start=m.start(), end=m.end(), replacement="<PHONE>",
             ))
 
-    # dates
+    # dates (regex catches structured dates spaCy might miss)
     for m in _DATE_RE.finditer(text):
         matches.append(PIIMatch(
             pii_type="DATE", value=m.group(),
