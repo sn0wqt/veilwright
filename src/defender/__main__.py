@@ -168,8 +168,8 @@ def _pretty_print(result, iteration: int, total: int) -> None:
         )
         pii_table.add_column("#", style="dim", width=4)
         pii_table.add_column("Type", style="cyan")
-        pii_table.add_column("Value", style="red")
-        pii_table.add_column("Action", style="yellow")
+        pii_table.add_column("Value", style="white")
+        pii_table.add_column("Action")
         for i, pii in enumerate(result.syntactic_pii_found, 1):
             # format: "TYPE: value [masked]" or "TYPE: value [detected]"
             bracket_idx = pii.rfind(" [")
@@ -182,7 +182,14 @@ def _pretty_print(result, iteration: int, total: int) -> None:
             parts = main_part.split(": ", 1)
             pii_type = parts[0] if len(parts) == 2 else "PII"
             pii_value = parts[1] if len(parts) == 2 else main_part
-            pii_table.add_row(str(i), pii_type, pii_value, action)
+            # color-code: masked = bold red, detected = dim yellow
+            if action == "masked":
+                styled_action = "[bold red]masked[/bold red]"
+                styled_value = f"[red]{pii_value}[/red]"
+            else:
+                styled_action = "[dim yellow]detected[/dim yellow]"
+                styled_value = f"[yellow]{pii_value}[/yellow]"
+            pii_table.add_row(str(i), pii_type, styled_value, styled_action)
         console.print(pii_table)
         console.print()
 

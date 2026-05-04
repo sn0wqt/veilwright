@@ -117,23 +117,25 @@ def _is_valid_phone(value: str) -> bool:
 def scan_text(text: str) -> ScanResult:
     """Scan free text for PII and return a masked version.
 
-    NER entities (names, locations, orgs) are DETECTED but NOT masked —
-    the LLM needs to see them to know what to rewrite.
-    Regex entities (emails, phones, credit cards) are DETECTED AND masked —
-    we don't want to leak raw PII to the API.
+    PERSON entities and regex matches (emails, phones, credit cards) are
+    MASKED before the LLM — direct identifiers we don't want to leak.
+    Other NER entities (locations, orgs, money) are DETECTED but NOT masked —
+    the LLM needs to see them to know what to rewrite semantically.
     """
     matches: list[PIIMatch] = []
 
-    # --- Pass 1: spaCy NER (detect only, don't mask) ---
+    # --- Pass 1: spaCy NER ---
     if _nlp is not None:
         doc = _nlp(text)
         for ent in doc.ents:
             if ent.label_ in _NER_LABEL_MAP:
                 pii_type, replacement = _NER_LABEL_MAP[ent.label_]
+                # PERSON gets masked (direct identifier), others are detect-only
+                should_mask = ent.label_ == "PERSON"
                 matches.append(PIIMatch(
                     pii_type=pii_type, value=ent.text,
                     start=ent.start_char, end=ent.end_char,
-                    replacement=replacement, mask=False,
+                    replacement=replacement, mask=should_mask,
                 ))
 
     # --- Pass 2: regex (detect AND mask) ---
