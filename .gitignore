@@ -28,6 +28,8 @@ desktop.ini
 # Environment / secrets
 .env
 .env.local
+*.json
+!package.json
 
 # pytest / coverage
 .pytest_cache/

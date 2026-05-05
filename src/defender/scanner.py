@@ -10,12 +10,15 @@ Two-pass detection:
 import re
 from dataclasses import dataclass, field
 
-import phonenumbers
+try:
+    import phonenumbers
+except ImportError:
+    phonenumbers = None
 
 # load spaCy model (with graceful fallback)
 try:
     import spacy
-    _nlp = spacy.load("en_core_web_sm")
+    _nlp = spacy.load("en_core_web_lg")
 except (ImportError, OSError):
     _nlp = None
 
@@ -70,8 +73,6 @@ _PHONE_CANDIDATE_RE = re.compile(
     r"(?!\d)"
 )
 
-_PERSON_TAG_RE = re.compile(r"<PERSON>")
-
 
 # spaCy entity label -> our PII type + replacement tag
 _NER_LABEL_MAP: dict[str, tuple[str, str]] = {
@@ -80,6 +81,7 @@ _NER_LABEL_MAP: dict[str, tuple[str, str]] = {
     "LOC":     ("LOCATION", "<LOCATION>"),
     "ORG":     ("ORGANIZATION", "<ORGANIZATION>"),
     "MONEY":   ("MONEY", "<MONEY>"),
+    "DATE":    ("DATE", "<DATE>"),
 }
 
 
@@ -103,6 +105,9 @@ def _luhn_check(card_number: str) -> bool:
 
 def _is_valid_phone(value: str) -> bool:
     """Check if a string looks like a real phone number."""
+    if phonenumbers is None:
+        # Fallback if library missing: just accept regex candidates
+        return True
     try:
         parsed = phonenumbers.parse(value.strip(), None)
         return phonenumbers.is_possible_number(parsed)
@@ -161,6 +166,7 @@ def scan_text(text: str) -> ScanResult:
         matches.append(PIIMatch(
             pii_type="DATE", value=m.group(),
             start=m.start(), end=m.end(), replacement="<DATE>",
+            mask=False,  # Keep dates visible to LLM for timeline shifting
         ))
 
     # credit cards
@@ -171,13 +177,6 @@ def scan_text(text: str) -> ScanResult:
                 pii_type="CREDIT_CARD", value=m.group(),
                 start=m.start(), end=m.end(), replacement="<CREDIT_CARD>",
             ))
-
-    # <PERSON> tags already in text
-    for m in _PERSON_TAG_RE.finditer(text):
-        matches.append(PIIMatch(
-            pii_type="PERSON", value=m.group(),
-            start=m.start(), end=m.end(), replacement="<PERSON>",
-        ))
 
     # deduplicate overlapping spans
     matches = _deduplicate_spans(matches)
