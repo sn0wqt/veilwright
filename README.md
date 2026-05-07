@@ -30,6 +30,9 @@ pip install uv
 
 # Sync dependencies
 uv sync --extra dev
+
+# Download the spaCy NER model
+uv pip install en_core_web_lg@https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
 ```
 
 ## Configuration

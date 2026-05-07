@@ -13,6 +13,8 @@ dependencies = [
     "rich>=13.0.0",
     "typer>=0.15.0",
     "phonenumbers>=9.0.23",
+    "spacy>=3.8.13",
+    "en-core-web-lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl",
 ]
 
 [project.scripts]
@@ -29,3 +31,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/defender"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

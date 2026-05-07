@@ -1,24 +1,38 @@
 """Syntactic PII scanner for the Defender agent.
 
-Detects and masks explicit PII tokens (emails, phones, dates, credit cards)
-before the text goes to the LLM for semantic rewriting.
+Two-pass detection:
+  1. spaCy NER — detects names, locations, orgs, money (reported but NOT masked,
+     so the LLM can see them and reason about how to rewrite them)
+  2. Regex — detects emails, phones, dates, credit cards (masked before LLM
+     to prevent leaking raw PII to the API)
 """
 
 import re
 from dataclasses import dataclass, field
 
-import phonenumbers
+try:
+    import phonenumbers
+except ImportError:
+    phonenumbers = None
+
+# load spaCy model (with graceful fallback)
+try:
+    import spacy
+    _nlp = spacy.load("en_core_web_lg")
+except (ImportError, OSError):
+    _nlp = None
 
 
 @dataclass
 class PIIMatch:
     """A single PII token found in the input text."""
 
-    pii_type: str       # e.g. "EMAIL", "PHONE", "DATE", "CREDIT_CARD", "PERSON"
+    pii_type: str       # e.g. "PERSON", "EMAIL", "PHONE", "LOCATION", etc.
     value: str
     start: int
     end: int
-    replacement: str    # e.g. "<EMAIL>"
+    replacement: str    # e.g. "<PERSON>"
+    mask: bool = True   # if False, detected but not masked in output
 
 
 @dataclass
@@ -30,7 +44,7 @@ class ScanResult:
 
 
 # ---------------------------------------------------------------------------
-# Regex patterns
+# Regex patterns (for things spaCy can't catch)
 # ---------------------------------------------------------------------------
 
 _EMAIL_RE = re.compile(
@@ -59,7 +73,16 @@ _PHONE_CANDIDATE_RE = re.compile(
     r"(?!\d)"
 )
 
-_PERSON_TAG_RE = re.compile(r"<PERSON>")
+
+# spaCy entity label -> our PII type + replacement tag
+_NER_LABEL_MAP: dict[str, tuple[str, str]] = {
+    "PERSON":  ("PERSON", "<PERSON>"),
+    "GPE":     ("LOCATION", "<LOCATION>"),
+    "LOC":     ("LOCATION", "<LOCATION>"),
+    "ORG":     ("ORGANIZATION", "<ORGANIZATION>"),
+    "MONEY":   ("MONEY", "<MONEY>"),
+    "DATE":    ("DATE", "<DATE>"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +105,9 @@ def _luhn_check(card_number: str) -> bool:
 
 def _is_valid_phone(value: str) -> bool:
     """Check if a string looks like a real phone number."""
+    if phonenumbers is None:
+        # Fallback if library missing: just accept regex candidates
+        return True
     try:
         parsed = phonenumbers.parse(value.strip(), None)
         return phonenumbers.is_possible_number(parsed)
@@ -94,8 +120,30 @@ def _is_valid_phone(value: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def scan_text(text: str) -> ScanResult:
-    """Scan free text for explicit PII and return a masked version."""
+    """Scan free text for PII and return a masked version.
+
+    PERSON entities and regex matches (emails, phones, credit cards) are
+    MASKED before the LLM — direct identifiers we don't want to leak.
+    Other NER entities (locations, orgs, money) are DETECTED but NOT masked —
+    the LLM needs to see them to know what to rewrite semantically.
+    """
     matches: list[PIIMatch] = []
+
+    # --- Pass 1: spaCy NER ---
+    if _nlp is not None:
+        doc = _nlp(text)
+        for ent in doc.ents:
+            if ent.label_ in _NER_LABEL_MAP:
+                pii_type, replacement = _NER_LABEL_MAP[ent.label_]
+                # PERSON gets masked (direct identifier), others are detect-only
+                should_mask = ent.label_ == "PERSON"
+                matches.append(PIIMatch(
+                    pii_type=pii_type, value=ent.text,
+                    start=ent.start_char, end=ent.end_char,
+                    replacement=replacement, mask=should_mask,
+                ))
+
+    # --- Pass 2: regex (detect AND mask) ---
 
     # emails
     for m in _EMAIL_RE.finditer(text):
@@ -113,11 +161,12 @@ def scan_text(text: str) -> ScanResult:
                 start=m.start(), end=m.end(), replacement="<PHONE>",
             ))
 
-    # dates
+    # dates (regex catches structured dates spaCy might miss)
     for m in _DATE_RE.finditer(text):
         matches.append(PIIMatch(
             pii_type="DATE", value=m.group(),
             start=m.start(), end=m.end(), replacement="<DATE>",
+            mask=False,  # Keep dates visible to LLM for timeline shifting
         ))
 
     # credit cards
@@ -129,19 +178,16 @@ def scan_text(text: str) -> ScanResult:
                 start=m.start(), end=m.end(), replacement="<CREDIT_CARD>",
             ))
 
-    # <PERSON> tags already in text
-    for m in _PERSON_TAG_RE.finditer(text):
-        matches.append(PIIMatch(
-            pii_type="PERSON", value=m.group(),
-            start=m.start(), end=m.end(), replacement="<PERSON>",
-        ))
-
     # deduplicate overlapping spans
     matches = _deduplicate_spans(matches)
 
-    # build masked text (replace from end to preserve indices)
+    # build masked text — only replace entities with mask=True
     masked = text
-    for match in sorted(matches, key=lambda m: m.start, reverse=True):
+    maskable = sorted(
+        [m for m in matches if m.mask],
+        key=lambda m: m.start, reverse=True,
+    )
+    for match in maskable:
         masked = masked[:match.start] + match.replacement + masked[match.end:]
 
     return ScanResult(pii_found=matches, masked_text=masked)

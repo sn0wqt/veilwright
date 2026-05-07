@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 
 from dotenv import load_dotenv
 from google import genai
@@ -22,25 +23,49 @@ class Defender:
     """Rewrites free text to hide target attributes using a syntactic + LLM pipeline."""
 
     DEFAULT_MODEL = "gemini-2.5-flash"
-    MAX_TOKENS = 4096
+    MAX_TOKENS = 16384
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+        self.model = model or self.DEFAULT_MODEL
+        self._client: genai.Client | None = None
+        self._fallback_client: genai.Client | None = None
+
+        # Primary: AI Studio (free tier)
         resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
-        if not resolved_key:
-            raise DefenderError(
-                "No Gemini API key provided. Set GEMINI_API_KEY in .env "
-                "or pass api_key= to the constructor."
+        if resolved_key:
+            self._client = genai.Client(api_key=resolved_key)
+
+        # Fallback: Vertex AI (Cloud credits)
+        credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        if credentials_path and project_id:
+            location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
+            self._fallback_client = genai.Client(
+                vertexai=True,
+                project=project_id,
+                location=location,
             )
 
-        self.model = model or self.DEFAULT_MODEL
-        self._client = genai.Client(api_key=resolved_key)
+        # If no primary, promote fallback
+        if self._client is None and self._fallback_client is not None:
+            self._client = self._fallback_client
+            self._fallback_client = None
+        elif self._client is None:
+            raise DefenderError(
+                "No credentials found. Set GEMINI_API_KEY for AI Studio, "
+                "or GOOGLE_APPLICATION_CREDENTIALS + GOOGLE_CLOUD_PROJECT "
+                "for Vertex AI."
+            )
 
     def run(self, defender_input: DefenderInput) -> DefenderOutput:
         """Run the full Defender pipeline on the given input."""
 
         # Step 1: syntactic scanner pass
         scan_result = scan_text(defender_input.text)
-        syntactic_pii = [f"{m.pii_type}: {m.value}" for m in scan_result.pii_found]
+        syntactic_pii = [
+            f"{m.pii_type}: {m.value} [{'masked' if m.mask else 'detected'}]"
+            for m in scan_result.pii_found
+        ]
 
         # use masked text for the LLM so we don't leak explicit PII
         text_for_llm = scan_result.masked_text
@@ -99,9 +124,27 @@ class Defender:
         )
 
     def _call_llm(self, contents: list[str]) -> str:
-        """Send contents to the Gemini API and return the text response."""
+        """Send contents to the Gemini API, falling back to Vertex on rate limits."""
         try:
-            response = self._client.models.generate_content(
+            return self._send(self._client, contents)
+        except DefenderError as exc:
+            # Check for rate-limit (429) or overload (503)
+            err_str = str(exc)
+            is_rate_limited = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+            is_unavailable = "503" in err_str or "UNAVAILABLE" in err_str
+
+            if (is_rate_limited or is_unavailable) and self._fallback_client:
+                print(
+                    "[defender] Free tier hit limit, switching to Vertex AI (Cloud credits)...",
+                    file=sys.stderr,
+                )
+                return self._send(self._fallback_client, contents)
+            raise
+
+    def _send(self, client: genai.Client, contents: list[str]) -> str:
+        """Send a request using a specific genai client."""
+        try:
+            response = client.models.generate_content(
                 model=self.model,
                 contents=contents,
                 config={
@@ -110,6 +153,14 @@ class Defender:
                     "temperature": 0.7,
                 },
             )
-            return response.text
+            text = response.text
+            if not text:
+                raise DefenderError(
+                    "Gemini returned an empty response. The input may be too "
+                    "long or the content may have been blocked."
+                )
+            return text
+        except DefenderError:
+            raise
         except Exception as exc:
             raise DefenderError(f"Gemini API error: {exc}") from exc
