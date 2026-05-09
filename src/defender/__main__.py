@@ -180,7 +180,6 @@ def defend(
 
         # in a full system the Attacker would evaluate here and provide feedback
         # for now, just simulate iteration without actual feedback
-        text = result.rewritten_text
 
 
 def _pretty_print(result, iteration: int, total: int, verbose: bool = False) -> None:
