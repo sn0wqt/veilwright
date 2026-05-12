@@ -31,7 +31,7 @@ class PIIMatch:
     value: str
     start: int
     end: int
-    replacement: str    # e.g. "<PERSON>"
+    replacement: str    # e.g. "<EMAIL>"
     mask: bool = True   # if False, detected but not masked in output
 
 
@@ -166,7 +166,7 @@ def scan_text(text: str) -> ScanResult:
         matches.append(PIIMatch(
             pii_type="DATE", value=m.group(),
             start=m.start(), end=m.end(), replacement="<DATE>",
-            mask=False,  # Keep dates visible to LLM for timeline shifting
+            mask=False,
         ))
 
     # credit cards

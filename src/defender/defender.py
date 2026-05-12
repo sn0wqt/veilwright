@@ -60,17 +60,25 @@ class Defender:
     def run(self, defender_input: DefenderInput) -> DefenderOutput:
         """Run the full Defender pipeline on the given input."""
 
-        # Step 1: syntactic scanner pass
+        # validate input text length (rough token estimate: 4 chars ≈ 1 token)
+        estimated_tokens = len(defender_input.text) // 4
+        if estimated_tokens > 6000:
+            raise DefenderError(
+                f"Input text too long (~{estimated_tokens} tokens). "
+                f"Maximum supported: ~6000 tokens to leave room for prompt and output."
+            )
+
+        # scan for explicit PII first
         scan_result = scan_text(defender_input.text)
         syntactic_pii = [
             f"{m.pii_type}: {m.value} [{'masked' if m.mask else 'detected'}]"
             for m in scan_result.pii_found
         ]
 
-        # use masked text for the LLM so we don't leak explicit PII
+        # send masked text to LLM so we don't leak raw emails/phones/etc
         text_for_llm = scan_result.masked_text
 
-        # Step 2: build prompt
+        # build the prompt
         user_prompt = build_rewrite_prompt(
             text=text_for_llm,
             target_attributes=defender_input.target_attributes,
@@ -78,14 +86,14 @@ class Defender:
             attacker_feedback=defender_input.attacker_feedback,
         )
 
-        # Step 3: call the LLM
+        # call the LLM
         contents = [user_prompt]
         llm_response_text = self._call_llm(contents)
 
-        # Step 4: parse + validate
+        # parse and validate
         try:
             parsed = parse_llm_json(llm_response_text)
-            errors = validate_defender_response(parsed)
+            errors = validate_defender_response(parsed, defender_input.target_attributes)
             if errors:
                 raise json.JSONDecodeError(
                     f"Validation errors: {'; '.join(errors)}",
@@ -93,14 +101,14 @@ class Defender:
                     0,
                 )
         except json.JSONDecodeError:
-            # retry once with a stricter prompt
+            # retry once with stricter prompt
             contents.append(llm_response_text)
             contents.append(RETRY_PROMPT)
             retry_text = self._call_llm(contents)
 
             try:
                 parsed = parse_llm_json(retry_text)
-                errors = validate_defender_response(parsed)
+                errors = validate_defender_response(parsed, defender_input.target_attributes)
                 if errors:
                     raise DefenderError(
                         f"LLM response failed validation after retry: {errors}"
@@ -121,6 +129,7 @@ class Defender:
             confidence=float(parsed["confidence"]),
             iteration=defender_input.iteration,
             syntactic_pii_found=syntactic_pii,
+            ground_truth=defender_input.ground_truth,  # pass through from input
         )
 
     def _call_llm(self, contents: list[str]) -> str:

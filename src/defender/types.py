@@ -32,6 +32,7 @@ class DefenderInput:
     target_attributes: list[str]
     iteration: int = 1
     attacker_feedback: str | None = None
+    ground_truth: dict[str, str] = field(default_factory=dict)  # optional: user-provided ground truth
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -43,6 +44,7 @@ class DefenderInput:
             target_attributes=data["target_attributes"],
             iteration=data.get("iteration", 1),
             attacker_feedback=data.get("attacker_feedback"),
+            ground_truth=data.get("ground_truth", {}),
         )
 
 
@@ -57,6 +59,7 @@ class DefenderOutput:
     confidence: float
     iteration: int
     syntactic_pii_found: list[str] = field(default_factory=list)
+    ground_truth: dict[str, str] = field(default_factory=dict)  # attribute -> actual value
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +70,7 @@ class DefenderOutput:
             "confidence": self.confidence,
             "iteration": self.iteration,
             "syntactic_pii_found": self.syntactic_pii_found,
+            "ground_truth": self.ground_truth,
         }
 
     @classmethod
@@ -81,4 +85,5 @@ class DefenderOutput:
             confidence=data["confidence"],
             iteration=data["iteration"],
             syntactic_pii_found=data.get("syntactic_pii_found", []),
+            ground_truth=data.get("ground_truth", {}),
         )

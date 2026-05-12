@@ -32,8 +32,11 @@ def parse_llm_json(text: str) -> dict:
     raise json.JSONDecodeError("No JSON object found in LLM response", cleaned, 0)
 
 
-def validate_defender_response(data: dict) -> list[str]:
-    """Check that an LLM response dict has the required fields. Returns error list."""
+def validate_defender_response(data: dict, target_attributes: list[str] | None = None) -> list[str]:
+    """Check that an LLM response dict has the required fields. Returns error list.
+
+    If target_attributes is provided, also validates that all attributes have strategies.
+    """
     errors: list[str] = []
 
     if "rewritten_text" not in data:
@@ -60,6 +63,15 @@ def validate_defender_response(data: dict) -> list[str]:
                         f"strategies_used[{i}] has invalid strategy "
                         f"'{record['strategy']}'. Must be one of {VALID_STRATEGY_NAMES}."
                     )
+
+        # check coverage: all target attributes must have a strategy (only if target_attributes provided)
+        if target_attributes:
+            covered = {s.get("attribute") for s in data["strategies_used"] if isinstance(s, dict)}
+            missing = set(target_attributes) - covered
+            if missing:
+                errors.append(
+                    f"Missing strategies for target attributes: {', '.join(sorted(missing))}"
+                )
 
     if "confidence" not in data:
         errors.append("Missing 'confidence' field.")
