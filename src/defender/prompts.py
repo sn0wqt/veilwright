@@ -212,6 +212,10 @@ guess any of the target attributes from the rewritten text.
 """
 
     prompt += """
+IMPORTANT: You MUST include exactly one entry in the `strategies_used` array \
+for EVERY target attribute requested. If an attribute is not present in the \
+text, use the "omission" strategy and explicitly state that it was absent.
+
 Return ONLY a JSON object with this exact structure (no markdown fences, no \
 extra text):
 
