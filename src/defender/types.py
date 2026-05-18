@@ -87,3 +87,35 @@ class DefenderOutput:
             syntactic_pii_found=data.get("syntactic_pii_found", []),
             ground_truth=data.get("ground_truth", {}),
         )
+
+
+@dataclass
+class UtilityInput:
+    """Input payload for the Utility Judge."""
+
+    original_text: str
+    rewritten_text: str
+    target_attributes: list[str] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class UtilityOutput:
+    """Output payload from the Utility Judge."""
+
+    original_text: str
+    rewritten_text: str
+    score: float
+    rationale: str
+    passes: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "original_text": self.original_text,
+            "rewritten_text": self.rewritten_text,
+            "score": self.score,
+            "rationale": self.rationale,
+            "passes": self.passes,
+        }

@@ -22,6 +22,11 @@ The Defender uses a two-pass pipeline:
    - **Shifting** — replace clues with plausible but different references
    - **Omission** — remove clues entirely (last resort)
 
+The full adversarial loop also includes:
+
+3. **Attacker** — attempts to de-anonymize rewritten text using contextual inference.
+4. **Utility Judge** — scores how much of the original meaning is preserved (0.0-1.0).
+
 ## Installation
 
 ```bash
@@ -81,6 +86,24 @@ JSON output (for machine-to-machine communication):
 defender anonymize --text "..." --attributes "Age" --json
 ```
 
+### Adversarial Loop (Defender + Attacker + Utility Judge)
+
+```bash
+defender adversarial --text "I remember watching a historic space event with my father..." --attributes "Age,Birth Year,Exact Event" --iterations 3 --json
+```
+
+Save a JSON report file:
+
+```bash
+defender adversarial --file input.txt --attributes "Age,Birth Year,Exact Event" --iterations 3 --json --out report.json
+```
+
+You can customize models and utility threshold:
+
+```bash
+defender adversarial --text "..." --attributes "Age" --defender-model gemini-2.5-flash --attacker-model gemini-3-flash-preview --utility-model gemini-2.5-flash --utility-threshold 0.75 --json
+```
+
 ### List Available Models
 
 ```bash
@@ -121,11 +144,14 @@ result = run_defender(DefenderInput(
 src/defender/
 ├── __init__.py      # Top-level API: run_defender()
 ├── __main__.py      # CLI entry point
+├── attacker.py      # Attacker prompt + parsing logic
 ├── defender.py      # Core pipeline: scanner → LLM → parse
+├── orchestrator.py  # Adversarial loop runner
 ├── prompts.py       # System prompt, user prompt builder, retry prompt
 ├── scanner.py       # Regex-based PII detection + masking
 ├── strategies.py    # RewriteStrategy enum + descriptions
 ├── types.py         # DefenderInput, DefenderOutput, StrategyRecord
+├── utility.py       # Utility Judge scorer
 └── utils.py         # JSON extraction + response validation
 ```
 

@@ -1,7 +1,16 @@
 """Defender — semantic text anonymization agent."""
 
 from defender.defender import Defender, DefenderError
-from defender.types import DefenderInput, DefenderOutput, StrategyRecord
+from defender.attacker import Attacker, AttackerError, AttackerOutput
+from defender.utility import UtilityJudge, UtilityError
+from defender.orchestrator import run_adversarial_loop
+from defender.types import (
+    DefenderInput,
+    DefenderOutput,
+    StrategyRecord,
+    UtilityInput,
+    UtilityOutput,
+)
 
 
 def run_defender(defender_input: DefenderInput) -> DefenderOutput:
@@ -16,8 +25,16 @@ def run_defender(defender_input: DefenderInput) -> DefenderOutput:
 __all__ = [
     "Defender",
     "DefenderError",
+    "Attacker",
+    "AttackerError",
+    "AttackerOutput",
+    "UtilityJudge",
+    "UtilityError",
     "DefenderInput",
     "DefenderOutput",
     "StrategyRecord",
+    "UtilityInput",
+    "UtilityOutput",
     "run_defender",
+    "run_adversarial_loop",
 ]
