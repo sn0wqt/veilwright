@@ -1,0 +1,83 @@
+=== Iteration 1/1 ===
+
+Ground Truth:
+  Name: ['Barack Hussein Obama', 'John Michael Osbourne', 'Francis Ford Coppola', 'Fernand Joseph Contandin', 'Federico Fellini']
+  Age: [62, 76, 85, 67, 73]
+  Profession: ['Politician', 'Singer, songwriter, and media personality', 'Filmmaker', 'Comic actor', 'Film director and screenwriter']
+  Location: ['United States', 'England', 'United States', 'Marseille, France', 'Italy']
+  Political Affiliation: ['Democratic Party', None, None, None, None]
+  Family Members: [None, None, None, ['Henriette Manse', 'Jean Manse'], None]
+
+Identified Clues:
+  Name:
+    - "44th president of the United States" (multi-hop): This exact historical title uniquely identifies Barack Obama.
+    - "first African American president" (multi-hop): This specific historical milestone uniquely identifies Barack Obama.
+    - "Dubbed the "Prince of Darkness"" (multi-hop): This famous cultural nickname uniquely identifies Ozzy Osbourne.
+    - "co-founded the band Black Sabbath in 1968" (multi-hop): Searching for the founders of this specific band reveals Ozzy Osbourne.
+    - "recipient of five Academy Awards, a BAFTA Award, three Golden Globe Awards, and two Palmes d'Or" (multi-hop): This highly specific combination of prestigious film awards uniquely identifies Francis Ford Coppola.
+    - "Fernand Joseph Contandin" (direct): The text explicitly reveals the real birth name of the actor Fernandel.
+    - "his 1963 film "8 and a half"" (multi-hop): Searching for the director of this famous 1963 film uniquely identifies Federico Fellini.
+  Age:
+    - "born 04.08.1961" (direct): Explicitly states the exact date of birth, allowing precise age calculation.
+    - "03.12.1948 – 22.07.2025" (direct): Explicitly states the exact birth and death dates.
+    - "born 07.04.1939" (direct): Explicitly states the exact date of birth.
+    - "08.05.1903 – 26.02.1971" (direct): Explicitly states the exact birth and death dates.
+    - "20.01.1920 – 31.09.1993" (direct): Explicitly states the exact birth and death dates.
+  Profession:
+    - "American politician" (direct): Explicitly states the profession.
+    - "president of the United States" (direct): Explicitly states the job title.
+    - "U.S. senator" (direct): Explicitly states the job title.
+    - "Illinois state senator" (direct): Explicitly states the job title.
+    - "English singer, songwriter, and media personality" (direct): Explicitly states the individual's professions.
+    - "lead vocalist" (direct): Explicitly states the specific role in the band.
+    - "American filmmaker" (direct): Explicitly states the profession.
+    - "French comic actor" (direct): Explicitly states the profession.
+    - "comedy star" (direct): Explicitly states the career status and profession.
+    - "Italian film director and screenwriter" (direct): Explicitly states the professions.
+  Location:
+    - "United States" (direct): Explicitly states the country the person governed.
+    - "representing Illinois" (direct): Explicitly states the state the person represented, implying residence.
+    - "English" (contextual): Implies the person was born in or resides in England.
+    - "American" (contextual): Implies the person is from or resides in the United States.
+    - "Marseille, France" (direct): Explicitly states the city and country of birth.
+    - "French" (contextual): Implies the person is from France.
+    - "Italian" (contextual): Implies the person is from Italy.
+  Political Affiliation:
+    - "member of the Democratic Party" (direct): Explicitly states the individual's political party affiliation.
+  Family Members:
+    - "marriage to <PERSON>" (relational): Explicitly mentions the existence of a spouse.
+    - "the sister of his best friend and frequent cinematic collaborator" (relational): Explains the familial relationship of the spouse to another individual, indicating a brother-in-law.
+
+Strategies Used:
+  [ABSTRACTION] Name: Replaced highly specific historical titles, famous nicknames, unique award combinations, true birth names, and specific film titles with generalized equivalents (e.g., 'senior leader', 'famous moniker', 'seminal mid-century piece') to prevent multi-hop identification.
+  [OMISSION] Age: Removed all exact birth and death dates entirely to prevent precise age calculation, as abstracting them would still leak chronological placement that could aid an attacker.
+  [ABSTRACTION] Profession: Substituted explicit job titles and roles (politician, president, senator, singer, filmmaker, actor, director) with broader, non-specific descriptors (official, cultural icon, creative visionary, public figure, creative artist).
+  [ABSTRACTION] Location: Replaced specific countries, states, and cities (United States, Illinois, English, Marseille, French, Italian) with generalized regional descriptions (major nation, regional district, European, Western, southern coastal city, Southern European).
+  [OMISSION] Income: Income was not present in the original text, so it was omitted by default.
+  [ABSTRACTION] Political Affiliation: Replaced the explicit mention of the 'Democratic Party' with 'prominent political faction' to obscure specific partisan alignment.
+  [ABSTRACTION] Family Members: Replaced the explicit references to a 'marriage' and a spouse who is the 'sister' of a collaborator with the vague phrase 'close personal connection with a peer's relative' to hide marital and familial status.
+
+Rewritten Text:
+This individual is a former official who served as the senior leader of a major nation. A member of a prominent political faction, they achieved a historic milestone in this role. They previously served as a national delegate for a regional district and as a local representative.
+
+A notable figure was a European cultural icon. Known by a famous moniker, they are widely credited as a pioneer of a distinct cultural movement. They co-founded a seminal collaborative group during the mid-20th century, and rose to prominence in the subsequent years as its primary focal point.
+
+This individual is a Western creative visionary. One of the leading figures of a major modern artistic wave, they are widely regarded as one of the greatest and most influential creators in their medium's history. They are the recipient of numerous top-tier international awards and prestigious festival honors, in addition to nominations across various other artistic disciplines.
+
+This historically significant individual, better known by a popular pseudonym, was a European public figure known for their humorous contributions. Born in a southern coastal city, they became widely recognized, first gaining popularity in various local cultural venues. Their pseudonym originated from a close personal connection with a peer's relative.
+
+This individual was a Southern European creative artist. They are known for their distinctive style, which blends imaginative and elaborate imagery with grounded themes. They are recognized as one of the greatest and most influential creators of all time. Their works have ranked highly in prestigious critical polls, which frequently list a seminal mid-century piece of theirs among the greatest of all time.
+
+Confidence: 95%
+
+Masked PII:
+  PERSON: Barack Hussein Obama [masked]
+  PERSON: Obama [masked]
+  PERSON: John Michael Osbourne [masked]
+  PERSON: Francis Ford Coppola [masked]
+  PERSON: Coppola [masked]
+  PERSON: Coppola [masked]
+  PERSON: Fernandel [masked]
+  PERSON: Henriette Manse [masked]
+  PERSON: Jean Manse [masked]
+  PERSON: Federico Fellini [masked]
