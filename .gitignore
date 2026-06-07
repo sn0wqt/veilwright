@@ -47,4 +47,4 @@ tests/
 *.db
 *.sqlite3
 CLAUDE.md
-INTEGRATION_GUIDE.md
+AGENTS.md

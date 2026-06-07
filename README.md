@@ -135,8 +135,11 @@ result = run_defender(DefenderInput(
     target_attributes=["Age", "Birth Year"],
     iteration=2,
     attacker_feedback="The narrator watched the moon landing at age 6, so born ~1963.",
+    ground_truth=previous_result.ground_truth,  # Important: carry over from iter 1
 ))
 ```
+
+*See [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) for full details on the `ground_truth` and `clue_map` fields.*
 
 ## Project Structure
 
@@ -154,10 +157,6 @@ src/defender/
 ├── utility.py       # Utility Judge scorer
 └── utils.py         # JSON extraction + response validation
 ```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 

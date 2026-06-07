@@ -57,12 +57,15 @@ def validate_defender_response(data: dict, target_attributes: list[str] | None =
                 if key not in record:
                     errors.append(f"strategies_used[{i}] missing '{key}'.")
             if "strategy" in record:
-                record["strategy"] = record["strategy"].lower()
-                if record["strategy"] not in VALID_STRATEGY_NAMES:
+                strategy_lower = record["strategy"].lower()
+                if strategy_lower not in VALID_STRATEGY_NAMES:
                     errors.append(
                         f"strategies_used[{i}] has invalid strategy "
                         f"'{record['strategy']}'. Must be one of {VALID_STRATEGY_NAMES}."
                     )
+                else:
+                    # normalize to lowercase for downstream use
+                    record["strategy"] = strategy_lower
 
         # check coverage: all target attributes must have a strategy (only if target_attributes provided)
         if target_attributes:

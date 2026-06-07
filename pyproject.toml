@@ -6,7 +6,7 @@ authors = [
     {name = "Asaad Falah Rasul", email = "asadfalah2@gmail.com"},
 ]
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "google-genai>=1.0.0",
     "python-dotenv>=1.0.0",

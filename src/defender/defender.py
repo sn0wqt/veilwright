@@ -7,7 +7,14 @@ import sys
 from dotenv import load_dotenv
 from google import genai
 
-from defender.prompts import SYSTEM_PROMPT, RETRY_PROMPT, build_rewrite_prompt
+from defender.prompts import (
+    REWRITE_SYSTEM_PROMPT,
+    ANALYSIS_SYSTEM_PROMPT,
+    RETRY_PROMPT,
+    build_clue_enumeration_prompt,
+    build_ground_truth_prompt,
+    build_rewrite_prompt,
+)
 from defender.scanner import scan_text
 from defender.types import DefenderInput, DefenderOutput, StrategyRecord
 from defender.utils import parse_llm_json, validate_defender_response
@@ -60,7 +67,9 @@ class Defender:
     def run(self, defender_input: DefenderInput) -> DefenderOutput:
         """Run the full Defender pipeline on the given input."""
 
-        # validate input text length (rough token estimate: 4 chars ≈ 1 token)
+        if not defender_input.text.strip():
+            raise DefenderError("Input text is empty.")
+
         estimated_tokens = len(defender_input.text) // 4
         if estimated_tokens > 6000:
             raise DefenderError(
@@ -68,7 +77,13 @@ class Defender:
                 f"Maximum supported: ~6000 tokens to leave room for prompt and output."
             )
 
-        # scan for explicit PII first
+        # --- Step 1: auto-extract ground truth if caller didn't provide it ---
+        if defender_input.iteration == 1 and not defender_input.ground_truth and defender_input.target_attributes:
+            defender_input.ground_truth = self.extract_ground_truth(
+                defender_input.text, defender_input.target_attributes
+            )
+
+        # --- Step 2: scan for explicit PII ---
         scan_result = scan_text(defender_input.text)
         syntactic_pii = [
             f"{m.pii_type}: {m.value} [{'masked' if m.mask else 'detected'}]"
@@ -78,33 +93,39 @@ class Defender:
         # send masked text to LLM so we don't leak raw emails/phones/etc
         text_for_llm = scan_result.masked_text
 
-        # build the prompt
+        # --- Step 3: clue enumeration pre-pass (iteration 1 only) ---
+        # On retries the attacker_feedback already tells us what clues slipped through,
+        # so we don't need to re-enumerate from scratch.
+        clue_map: dict = {}
+        if defender_input.iteration == 1 and defender_input.target_attributes:
+            clue_map = self._enumerate_clues(text_for_llm, defender_input.target_attributes)
+
+        # --- Step 4: build the rewrite prompt with clue map baked in ---
         user_prompt = build_rewrite_prompt(
             text=text_for_llm,
             target_attributes=defender_input.target_attributes,
             iteration=defender_input.iteration,
             attacker_feedback=defender_input.attacker_feedback,
+            clue_map=clue_map or None,
         )
 
-        # call the LLM
+        # --- Step 5: call the LLM ---
         contents = [user_prompt]
         llm_response_text = self._call_llm(contents)
 
-        # parse and validate
+        # --- Step 6: parse and validate ---
+        needs_retry = False
         try:
             parsed = parse_llm_json(llm_response_text)
             errors = validate_defender_response(parsed, defender_input.target_attributes)
             if errors:
-                raise json.JSONDecodeError(
-                    f"Validation errors: {'; '.join(errors)}",
-                    llm_response_text,
-                    0,
-                )
+                needs_retry = True
         except json.JSONDecodeError:
+            needs_retry = True
+
+        if needs_retry:
             # retry once with stricter prompt
-            contents.append(llm_response_text)
-            contents.append(RETRY_PROMPT)
-            retry_text = self._call_llm(contents)
+            retry_text = self._call_llm([user_prompt, RETRY_PROMPT])
 
             try:
                 parsed = parse_llm_json(retry_text)
@@ -118,7 +139,7 @@ class Defender:
                     f"Failed to parse LLM JSON after retry: {exc}"
                 ) from exc
 
-        # build output
+        # --- Step 7: build output ---
         strategies = [StrategyRecord.from_dict(s) for s in parsed["strategies_used"]]
 
         return DefenderOutput(
@@ -129,13 +150,58 @@ class Defender:
             confidence=float(parsed["confidence"]),
             iteration=defender_input.iteration,
             syntactic_pii_found=syntactic_pii,
-            ground_truth=defender_input.ground_truth,  # pass through from input
+            ground_truth=defender_input.ground_truth,
+            clue_map=clue_map,
         )
 
-    def _call_llm(self, contents: list[str]) -> str:
+    def extract_ground_truth(
+        self, text: str, target_attributes: list[str]
+    ) -> dict[str, str]:
+        """Infer the actual values of target attributes from the original text.
+
+        Uses an LLM call to perform any reasoning needed (e.g. event year +
+        stated age → birth year). Fails silently and returns {} so the pipeline
+        is never blocked by a bad response here.
+        """
+        if not target_attributes:
+            return {}
+        prompt = build_ground_truth_prompt(text, target_attributes)
+        try:
+            response = self._call_llm([prompt], system_prompt=ANALYSIS_SYSTEM_PROMPT)
+            parsed = parse_llm_json(response)
+            return {
+                k: str(v)
+                for k, v in parsed.get("ground_truth", {}).items()
+                if v is not None
+            }
+        except Exception:
+            # non-fatal — orchestrator can still run without ground truth
+            return {}
+
+    def _enumerate_clues(
+        self, text: str, target_attributes: list[str]
+    ) -> dict:
+        """Pre-pass: map every inference chain that could reveal a target attribute.
+
+        The result is injected into the rewrite prompt as an explicit checklist,
+        so the rewriting LLM doesn't have to discover clues itself mid-task.
+        Fails silently and returns {} so the pipeline degrades gracefully.
+        """
+        if not target_attributes:
+            return {}
+        prompt = build_clue_enumeration_prompt(text, target_attributes)
+        try:
+            response = self._call_llm([prompt], system_prompt=ANALYSIS_SYSTEM_PROMPT)
+            parsed = parse_llm_json(response)
+            return parsed.get("clue_map", {})
+        except Exception:
+            # non-fatal — rewrite will still run, just without the explicit checklist
+            return {}
+
+    def _call_llm(self, contents: list[str], system_prompt: str = REWRITE_SYSTEM_PROMPT) -> str:
         """Send contents to the Gemini API, falling back to Vertex on rate limits."""
         try:
-            return self._send(self._client, contents)
+            return self._send(self._client, contents, system_prompt)
         except DefenderError as exc:
             # Check for rate-limit (429) or overload (503)
             err_str = str(exc)
@@ -147,17 +213,17 @@ class Defender:
                     "[defender] Free tier hit limit, switching to Vertex AI (Cloud credits)...",
                     file=sys.stderr,
                 )
-                return self._send(self._fallback_client, contents)
+                return self._send(self._fallback_client, contents, system_prompt)
             raise
 
-    def _send(self, client: genai.Client, contents: list[str]) -> str:
+    def _send(self, client: genai.Client, contents: list[str], system_prompt: str) -> str:
         """Send a request using a specific genai client."""
         try:
             response = client.models.generate_content(
                 model=self.model,
                 contents=contents,
                 config={
-                    "system_instruction": SYSTEM_PROMPT,
+                    "system_instruction": system_prompt,
                     "max_output_tokens": self.MAX_TOKENS,
                     "temperature": 0.7,
                 },

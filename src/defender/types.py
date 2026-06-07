@@ -60,6 +60,7 @@ class DefenderOutput:
     iteration: int
     syntactic_pii_found: list[str] = field(default_factory=list)
     ground_truth: dict[str, str] = field(default_factory=dict)  # attribute -> actual value
+    clue_map: dict[str, list[dict[str, str]]] = field(default_factory=dict)  # attribute -> list of clue dicts (from pre-pass)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +72,7 @@ class DefenderOutput:
             "iteration": self.iteration,
             "syntactic_pii_found": self.syntactic_pii_found,
             "ground_truth": self.ground_truth,
+            "clue_map": self.clue_map,
         }
 
     @classmethod
@@ -86,6 +88,7 @@ class DefenderOutput:
             iteration=data["iteration"],
             syntactic_pii_found=data.get("syntactic_pii_found", []),
             ground_truth=data.get("ground_truth", {}),
+            clue_map=data.get("clue_map", {}),
         )
 
 
