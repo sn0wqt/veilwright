@@ -1,12 +1,15 @@
 """LLM prompt templates for the Defender agent.
 
 Exports:
-    REWRITE_SYSTEM_PROMPT       — system instruction for rewrite calls
-    ANALYSIS_SYSTEM_PROMPT      — system instruction for GT/clue enumeration calls
-    RETRY_PROMPT                — appended when LLM returns invalid JSON
+    REWRITE_SYSTEM_PROMPT         — system instruction for rewrite LLM calls
+    ANALYSIS_SYSTEM_PROMPT        — system instruction for GT/clue enumeration calls
+    UTILITY_SYSTEM_PROMPT         — system instruction for Utility Judge calls
+    RETRY_PROMPT                  — appended when rewrite LLM returns invalid JSON
+    UTILITY_RETRY_PROMPT          — appended when utility LLM returns invalid JSON
     build_clue_enumeration_prompt — pre-pass: map all inference chains per attribute
-    build_ground_truth_prompt   — extract actual attribute values from original text
-    build_rewrite_prompt        — main rewrite instruction (accepts optional clue_map)
+    build_ground_truth_prompt     — extract actual attribute values from original text
+    build_rewrite_prompt          — main rewrite instruction (accepts optional clue_map)
+    build_utility_prompt          — utility judge scoring instruction
 """
 
 from defender.strategies import STRATEGY_DESCRIPTIONS, RewriteStrategy
@@ -49,11 +52,26 @@ Be thorough, precise, and return your response as valid JSON (and nothing else).
 """
 
 
+UTILITY_SYSTEM_PROMPT = """\
+You are the Utility Judge in a multi-agent semantic anonymization system.
+
+Your task is to score how much of the original, non-sensitive meaning was \
+preserved in the rewritten text. The rewritten text may intentionally remove \
+or alter clues that reveal target attributes.
+
+RULES:
+- Focus on semantic meaning preservation: events, relationships, tone, and intent.
+- Do NOT penalize removal or abstraction of target attributes.
+- Penalize factual contradictions, missing core meaning, or added facts.
+- Return your response as valid JSON (and nothing else).
+"""
+
+
 def build_clue_enumeration_prompt(text: str, target_attributes: list[str]) -> str:
     """Build the prompt for the clue enumeration pre-pass.
 
-    This runs before the rewrite so the LLM knows exactly what inference
-    chains exist for each target attribute before deciding how to neutralize them.
+    Runs before the rewrite so the LLM has an explicit checklist of every
+    inference chain per attribute rather than discovering clues mid-task.
     """
     attributes_list = "\n".join(f"  - {attr}" for attr in target_attributes)
 
@@ -213,8 +231,8 @@ guess any of the target attributes from the rewritten text.
 
     prompt += """
 IMPORTANT: You MUST include exactly one entry in the `strategies_used` array \
-for EVERY target attribute requested. If an attribute is not present in the \
-text, use the "omission" strategy and explicitly state that it was absent.
+for EVERY target attribute requested above. If an attribute is not present in \
+the text, use the "omission" strategy and state it was absent.
 
 Return ONLY a JSON object with this exact structure (no markdown fences, no \
 extra text):
@@ -235,6 +253,39 @@ extra text):
     return prompt
 
 
+def build_utility_prompt(
+    original_text: str,
+    rewritten_text: str,
+    target_attributes: list[str] | None = None,
+) -> str:
+    """Build the user message for the Utility Judge scoring request."""
+    targets = "\n".join(f"  - {attr}" for attr in (target_attributes or []))
+
+    return f"""\
+Evaluate how well the rewritten text preserves the original meaning.
+
+TARGET ATTRIBUTES (allowed to be hidden or altered):
+{targets if targets else "  - (none provided)"}
+
+ORIGINAL TEXT:
+\"\"\"
+{original_text}
+\"\"\"
+
+REWRITTEN TEXT:
+\"\"\"
+{rewritten_text}
+\"\"\"
+
+Return ONLY a JSON object with this exact structure (no markdown fences, no extra text):
+
+{{
+    "score": 0.0,
+    "rationale": "..."
+}}
+"""
+
+
 RETRY_PROMPT = """\
 Your previous response was not valid JSON. Please respond with ONLY a raw JSON \
 object — no markdown code fences, no commentary, no text before or after the JSON.
@@ -243,6 +294,18 @@ The JSON must have exactly these keys:
 - "rewritten_text": string
 - "strategies_used": array of objects, each with "attribute", "strategy", "reasoning"
 - "confidence": number between 0.0 and 1.0
+
+Respond now with the corrected JSON:
+"""
+
+
+UTILITY_RETRY_PROMPT = """\
+Your previous response was not valid JSON. Please respond with ONLY a raw JSON \
+object — no markdown code fences, no commentary, no text before or after the JSON.
+
+The JSON must have exactly these keys:
+- "score": number between 0.0 and 1.0
+- "rationale": string
 
 Respond now with the corrected JSON:
 """

@@ -84,3 +84,22 @@ def validate_defender_response(data: dict, target_attributes: list[str] | None =
         errors.append("'confidence' must be between 0.0 and 1.0.")
 
     return errors
+
+
+def validate_utility_response(data: dict) -> list[str]:
+    """Check that a Utility Judge response dict has the required fields."""
+    errors: list[str] = []
+
+    if "score" not in data:
+        errors.append("Missing 'score' field.")
+    elif not isinstance(data["score"], (int, float)):
+        errors.append("'score' must be a number.")
+    elif not 0.0 <= data["score"] <= 1.0:
+        errors.append("'score' must be between 0.0 and 1.0.")
+
+    if "rationale" not in data:
+        errors.append("Missing 'rationale' field.")
+    elif not isinstance(data["rationale"], str):
+        errors.append("'rationale' must be a string.")
+
+    return errors

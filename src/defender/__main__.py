@@ -14,6 +14,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from defender.defender import Defender, DefenderError
+from defender.attacker import AttackerError
+from defender.utility import UtilityError
+from defender.orchestrator import run_adversarial_loop
 from defender.types import DefenderInput, DefenderOutput
 
 load_dotenv()
@@ -254,6 +257,119 @@ def _format_txt_block(result: DefenderOutput, iteration: int, total: int) -> str
             lines.append(f"  {p}")
 
     return "\n".join(lines)
+
+
+@app.command("adversarial")
+def adversarial_loop(
+    text: str | None = typer.Option(
+        None,
+        "--text",
+        "-t",
+        help="The sensitive text to anonymize (inline). Use --file for longer texts.",
+    ),
+    file: Path | None = typer.Option(
+        None,
+        "--file",
+        "-f",
+        help="Path to a text file containing the sensitive text.",
+        exists=True,
+        readable=True,
+    ),
+    attributes: str = typer.Option(
+        ...,
+        "--attributes",
+        "-a",
+        help='Comma-separated target attributes to hide (e.g. "Age,Birth Year,Exact Event").',
+    ),
+    iterations: int = typer.Option(
+        3,
+        "--iterations",
+        "-n",
+        help="Maximum adversarial loop iterations to run.",
+        min=1,
+    ),
+    defender_model: str = typer.Option(
+        "gemini-2.5-flash",
+        "--defender-model",
+        help="Gemini model to use for the Defender.",
+    ),
+    attacker_model: str = typer.Option(
+        "gemini-3-flash-preview",
+        "--attacker-model",
+        help="Gemini model to use for the Attacker.",
+    ),
+    utility_model: str = typer.Option(
+        "gemini-2.5-flash",
+        "--utility-model",
+        help="Gemini model to use for the Utility Judge.",
+    ),
+    utility_threshold: float = typer.Option(
+        0.75,
+        "--utility-threshold",
+        help="Pass threshold for utility score (0.0-1.0).",
+        min=0.0,
+        max=1.0,
+    ),
+    output_json: bool = typer.Option(
+        True,
+        "--json/--no-json",
+        help="Output JSON results (default: true).",
+    ),
+    output_file: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Write the JSON report to this file path.",
+    ),
+) -> None:
+    """Run the full Defender -> Attacker -> Utility adversarial loop."""
+
+    if text and file:
+        console.print(
+            "[bold red]Error:[/bold red] Provide either --text or --file, not both."
+        )
+        raise typer.Exit(code=1)
+    if not text and not file:
+        console.print("[bold red]Error:[/bold red] Provide either --text or --file.")
+        raise typer.Exit(code=1)
+
+    if file:
+        try:
+            text = file.read_text(encoding="utf-8")
+        except Exception as exc:
+            console.print(f"[bold red]Error reading file:[/bold red] {exc}")
+            raise typer.Exit(code=1)
+
+    attr_list = [a.strip() for a in attributes.split(",") if a.strip()]
+    if not attr_list:
+        console.print("[bold red]Error:[/bold red] No attributes provided.")
+        raise typer.Exit(code=1)
+
+    try:
+        result = run_adversarial_loop(
+            text=text,
+            target_attributes=attr_list,
+            max_iterations=iterations,
+            defender_model=defender_model,
+            attacker_model=attacker_model,
+            utility_model=utility_model,
+            utility_threshold=utility_threshold,
+        )
+    except (DefenderError, AttackerError, UtilityError) as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    payload = result.to_dict()
+    if output_file:
+        try:
+            output_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as exc:
+            console.print(f"[bold red]Error writing output file:[/bold red] {exc}")
+            raise typer.Exit(code=1)
+
+    if output_json:
+        console.print_json(json.dumps(payload, indent=2))
+    else:
+        console.print(payload)
 
 
 def _pretty_print(
