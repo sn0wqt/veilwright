@@ -53,25 +53,22 @@ The `ground_truth` field is a dictionary mapping each target attribute to its ac
 
 The `ground_truth` can be **user-provided** when calling the Defender, or **auto-extracted** if omitted.
 
-**Auto-extraction (default):** If you don't provide `ground_truth`, the Defender makes an LLM call to infer the actual values from the original text. This happens once on the first call, then the extracted values are reused for all subsequent iterations.
+**Auto-extraction (default):** If you don't provide `ground_truth`, the Defender makes an LLM call on iteration 1 to infer the actual values from the original text. The orchestrator then reuses those extracted values for all subsequent iterations by passing them back in `DefenderInput.ground_truth`.
 
-**User-provided (recommended for orchestrator):** For better performance and consistency, the orchestrator should extract ground truth once and pass it to all Defender iterations:
+**User-provided:** If you already know the true values, pass them in `DefenderInput.ground_truth`. The Defender will use those values directly and skip auto-extraction:
 
 ```python
-# Orchestrator extracts once
-ground_truth = extract_ground_truth_once(text, target_attributes)
-
-# Pass to all iterations
-for iteration in range(1, max_iterations + 1):
-    result = run_defender(DefenderInput(
-        text=text,
-        target_attributes=target_attributes,
-        ground_truth=ground_truth,  # ← Reuse across iterations
-        iteration=iteration,
-    ))
+result = run_defender(DefenderInput(
+    text=text,
+    target_attributes=target_attributes,
+    ground_truth={
+        "Age": "46",
+        "Profession": "Cardiologist",
+    },
+))
 ```
 
-**Why user-provided is better:** While the Defender *can* auto-extract ground truth, doing it at the Orchestrator level is recommended for production. It saves the Defender an extra LLM call (reducing latency and token cost), and ensures the Judge and Attacker receive a stable, consistent set of ground truth values across all adversarial iterations.
+In the built-in adversarial loop, `run_adversarial_loop()` passes an empty `ground_truth` dictionary on iteration 1, lets the Defender auto-extract the values once, then carries `defender_output.ground_truth` forward into every later `DefenderInput`. Ground truth is not re-extracted on iteration 2+.
 
 ### Usage Example
 
@@ -88,11 +85,15 @@ result = run_defender(DefenderInput(
     }
 ))
 
-# Now the Judge can compare:
+# Now the orchestrator can compare:
 # - result.ground_truth["Birth Year"] = "1990" (actual)
 # - attacker_guess["Birth Year"] = "1990" (guessed)
-# - Match? Yes → Defender failed, retry with heavier rewrite
+# - Match? Yes → privacy failed, retry with stronger anonymization for that clue
 ```
+
+## The `clue_map` Field
+
+The `clue_map` field is populated only on `iteration == 1`. It contains the Defender's pre-pass map of direct, contextual, multi-hop, and relational clues that could reveal each target attribute. On later iterations the Defender relies on `attacker_feedback` from the previous round instead of re-running clue enumeration.
 
 ## For the Attacker
 
@@ -102,27 +103,37 @@ Your output should match this structure so the Judge can easily compare:
 {
     "guesses": {
         "Age": "6 years old",
-        "Birth Year": "1963",
-        # ... one entry per target_attributes
+        "Birth Year": "1963"
     },
-    "reasoning": str,  # Your chain-of-thought
-    "confidence": float  # 0.0-1.0
+    "reasoning": {
+        "Age": "The rewritten text still says the narrator was a young child at the event.",
+        "Birth Year": "The event clue plus age suggests the early 1960s."
+    },
+    "confidence": {
+        "Age": 0.8,
+        "Birth Year": 0.75
+    },
+    "successful_attributes": ["Age", "Birth Year"],
+    "raw_response": "<optional raw LLM response when serialized from AttackerOutput>"
 }
 ```
 
-The Judge will then compare `defender_output.ground_truth` vs `attacker_output.guesses`.
+The Attacker must key `guesses`, `reasoning`, and `confidence` by the exact requested target attributes. Use `"UNKNOWN"` for any value that cannot be inferred. The orchestrator verifies `attacker_output.guesses` against `defender_output.ground_truth`; when ground truth is available, it overwrites `successful_attributes` in the stored iteration with the attributes that actually matched.
 
-## For the Judge
+## For the Utility Judge
 
 You'll receive:
 1. `defender_output.original_text` - The original
 2. `defender_output.rewritten_text` - The anonymized version
-3. `defender_output.ground_truth` - The actual sensitive values
-4. `attacker_output.guesses` - What the Attacker guessed
+3. `defender_output.target_attributes` - Attributes that were allowed to be hidden or altered
 
-Your job:
-1. **Privacy score**: Did the Attacker guess correctly? Compare `ground_truth` vs `guesses`
-2. **Utility score**: How much meaning was preserved? Compare `original_text` vs `rewritten_text`
+Your job is only to score utility: how much non-sensitive meaning was preserved when comparing `original_text` and `rewritten_text`. Do not penalize removal, abstraction, or shifting of the requested target attributes.
+
+## For the Orchestrator
+
+The orchestrator compares `defender_output.ground_truth` against `attacker_output.guesses`. A target attribute counts as successfully guessed only when the attacker's confidence is at least the configured confidence threshold and the guess fuzzy-matches ground truth. The default threshold is `0.7`; pass `confidence_threshold=0.8` to `run_adversarial_loop()` or use the CLI `--confidence-threshold` flag to override it. Fuzzy matching includes exact/substring matches and controlled numeric proximity for age/year attributes. If ground truth is unavailable for an attribute, the orchestrator falls back to `attacker_output.successful_attributes`.
+
+The loop continues while either privacy fails or utility is below threshold. Feedback sent back to the Defender includes both signals: attacker reasoning for successfully guessed attributes, and utility-recovery guidance when privacy passes but too much non-sensitive meaning was lost.
 
 ## CLI Usage
 
@@ -132,19 +143,24 @@ When using the CLI, you can't provide ground truth (it's for programmatic use). 
 defender anonymize --text "I was born in 1990." --attributes "Birth Year"
 ```
 
-For the full adversarial loop, use the Python API:
+For the full adversarial loop, use the CLI or Python API:
 
-```python
-from defender import run_defender, DefenderInput
-
-defender_output = run_defender(DefenderInput(
-    text="...",
-    target_attributes=["Age", "Location"],
-    ground_truth={"Age": "30", "Location": "New York"}
-))
-
-# Pass defender_output to Attacker
-# Pass both to Judge
+```bash
+defender adversarial --text "I moved to Paris after finishing medical school." --attributes "Location,Profession" --iterations 3 --no-json
 ```
 
+```python
+from defender import run_adversarial_loop
 
+result = run_adversarial_loop(
+    text="I moved to Paris after finishing medical school.",
+    target_attributes=["Location", "Profession"],
+    max_iterations=3,
+    confidence_threshold=0.7,
+)
+
+print(result.success)
+print(result.exit_reason)
+print(result.final_rewritten_text)
+print(result.confidence_threshold)
+```

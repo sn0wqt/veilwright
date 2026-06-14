@@ -34,3 +34,6 @@ packages = ["src/defender"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

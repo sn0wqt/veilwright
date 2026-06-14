@@ -1,68 +1,63 @@
-"""Attacker agent: tries to de-anonymize rewritten text."""
+"""Attacker agent: tries to de-anonymize rewritten text targeting specific attributes."""
 
-import json
-import os
-import re
-import sys
-from dataclasses import dataclass
-
-from dotenv import load_dotenv
-from google import genai
-
-load_dotenv()
+from defender.llm_client import GeminiClient
+from defender.types import AttackerOutput
+from defender.utils import parse_validated_llm_json
 
 
-ATTACKER_PROMPT_TEMPLATE = """
-You are the guessing agent in a multi-agent semantic anonymization system.
+def _build_system_prompt(confidence_threshold: float) -> str:
+    """Build the Attacker system prompt with the active confidence threshold."""
+    return f"""You are an adversarial Attacker agent in a multi-agent semantic anonymization system.
 
-Your task is to apply chain of thoughts to de-anonymize the information from the text given and return both de-anonymized data and the text filled
-with that de-anonymized data.
-You should search for names, locations, organizations and dates relying on the context, given by text. For example,
-if the text says that the person was born on 4th of August 1961 in Hawaii and during his career was a president of USA you should
-suggest that the text is about Barack Obama. In addition, you should try to de-anonymize any other information with respect to already found names,
-locations, organizations and dates.
+Your goal is to de-anonymize the rewritten text by inferring specific target attributes about the subject of the text.
 
-Rules:
-- Return ONLY a valid dictionary-like text which follows the given structure, where each of the keys contains a list of contents:
-"PERSON": [Name1, Name2,...],
-"LOC": [Location1, Location2,...],
-"ORG": [Organization1, Organization2...],
-"DATE": [Date1, Date2,...],
-"TEXT_R": full text containing de-anonymized data
-- If you are not able to de-anonymize hidden data, you should return json-like text containing empty lists for related keys
-in the structure defined above and partially filled full text
-- Do NOT invent any facts, dates or info
-- Do NOT return text as json
-- Do NOT miss the outer brackets of dictionary
+You MUST think step-by-step using chain-of-thought reasoning to analyze the clues remaining in the text and infer the actual value for each target attribute.
+For each target attribute:
+1. Walk through the clues, contextual hints, and temporal/relational markers.
+2. Make your best guess for the attribute value. If an attribute genuinely cannot be inferred from the text (i.e. no clues remain), use "UNKNOWN".
+3. Assign a confidence score from 0.0 to 1.0 indicating how certain you are of your guess.
 
-Text:
-{text}
+You MUST include exactly one entry for every requested target attribute in
+`guesses`, `reasoning`, and `confidence`. Do not include attributes outside
+the requested target list. In `reasoning`, explicitly name the clues you used;
+if no clue remains, explain why the value is UNKNOWN.
+In `successful_attributes`, include only requested attributes where confidence
+is >= {confidence_threshold:.2f} and the guess is not "UNKNOWN".
+
+You must return your response as a valid JSON object with the following structure:
+{{
+  "guesses": {{
+    "<attribute_name>": "<best guess or UNKNOWN>"
+  }},
+  "reasoning": {{
+    "<attribute_name>": "<step-by-step inference details>"
+  }},
+  "confidence": {{
+    "<attribute_name>": 0.85
+  }},
+  "successful_attributes": [
+    "<attribute_name>"
+  ]
+}}
+
+Repeat each object member for every requested target attribute. If no attribute
+meets the success criteria, return an empty `successful_attributes` array.
+No other text or markdown code fences outside the JSON.
 """
 
 
-@dataclass
-class AttackerOutput:
-    """Parsed Attacker results."""
+def _build_retry_prompt(confidence_threshold: float) -> str:
+    """Build the Attacker retry prompt with the active confidence threshold."""
+    return f"""Your previous response was not valid JSON. Please respond with ONLY a raw JSON object — no markdown code fences, no commentary, no text before or after the JSON.
 
-    person: list[str]
-    loc: list[str]
-    org: list[str]
-    date: list[str]
-    text_r: str
-    raw_response: str
+The JSON must have exactly these keys:
+- "guesses": object mapping attribute name to guess (string)
+- "reasoning": object mapping attribute name to reasoning (string)
+- "confidence": object mapping attribute name to float between 0.0 and 1.0
+- "successful_attributes": list of requested attributes where confidence >= {confidence_threshold:.2f}
 
-    def to_dict(self) -> dict:
-        return {
-            "PERSON": self.person,
-            "LOC": self.loc,
-            "ORG": self.org,
-            "DATE": self.date,
-            "TEXT_R": self.text_r,
-            "raw_response": self.raw_response,
-        }
-
-    def has_any_entities(self) -> bool:
-        return bool(self.person or self.loc or self.org or self.date)
+Respond now with the corrected JSON:
+"""
 
 
 class AttackerError(Exception):
@@ -75,161 +70,152 @@ class Attacker:
     DEFAULT_MODEL = "gemini-3-flash-preview"
     MAX_TOKENS = 4096
 
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        confidence_threshold: float = 0.7,
+    ) -> None:
+        if not 0.0 <= confidence_threshold <= 1.0:
+            raise AttackerError("confidence_threshold must be between 0.0 and 1.0.")
         self.model = model or self.DEFAULT_MODEL
-        self._client: genai.Client | None = None
-        self._fallback_client: genai.Client | None = None
+        self.confidence_threshold = confidence_threshold
+        self._llm = GeminiClient(
+            model=self.model,
+            label="attacker",
+            error_type=AttackerError,
+            api_key=api_key,
+        )
 
-        resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
-        if resolved_key:
-            self._client = genai.Client(api_key=resolved_key)
+    def run(self, rewritten_text: str, target_attributes: list[str]) -> AttackerOutput:
+        """Run the attacker against rewritten text to guess target attributes."""
+        if not rewritten_text.strip():
+            raise AttackerError("rewritten_text must be non-empty.")
+        if not target_attributes:
+            raise AttackerError("target_attributes must contain at least one attribute.")
 
-        credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if credentials_path and project_id:
-            location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
-            self._fallback_client = genai.Client(
-                vertexai=True,
-                project=project_id,
-                location=location,
-            )
+        prompt = self._build_prompt(rewritten_text, target_attributes)
+        raw_response = self._call_llm([prompt])
 
-        if self._client is None and self._fallback_client is not None:
-            self._client = self._fallback_client
-            self._fallback_client = None
-        elif self._client is None:
-            raise AttackerError(
-                "No credentials found. Set GEMINI_API_KEY for AI Studio, "
-                "or GOOGLE_APPLICATION_CREDENTIALS + GOOGLE_CLOUD_PROJECT "
-                "for Vertex AI."
-            )
+        parsed = parse_validated_llm_json(
+            initial_text=raw_response,
+            retry=lambda: self._call_llm(
+                [prompt, _build_retry_prompt(self.confidence_threshold)]
+            ),
+            validate=lambda data: self._validate_response(data, target_attributes),
+            error_type=AttackerError,
+            parse_error_message="Failed to parse Attacker JSON after retry: {error}",
+            validation_error_message=(
+                "Attacker response failed validation after retry: {errors}"
+            ),
+        )
 
-    def run(self, text: str) -> AttackerOutput:
-        """Run the attacker against one rewritten text."""
-        prompt = ATTACKER_PROMPT_TEMPLATE.format(text=text)
-        raw = self._call_llm([prompt])
-        return _parse_attacker_output(raw)
+        # Ensure all target attributes exist in parsed output and recompute successes.
+        guesses_raw = parsed.get("guesses", {})
+        reasoning_raw = parsed.get("reasoning", {})
+        confidence_raw = parsed.get("confidence", {})
+        guesses = (
+            {str(k): str(v) for k, v in guesses_raw.items()}
+            if isinstance(guesses_raw, dict)
+            else {}
+        )
+        reasoning = (
+            {str(k): str(v) for k, v in reasoning_raw.items()}
+            if isinstance(reasoning_raw, dict)
+            else {}
+        )
+        confidence_values = confidence_raw if isinstance(confidence_raw, dict) else {}
+
+        confidence: dict[str, float] = {}
+        successful_attributes: list[str] = []
+        for attr in target_attributes:
+            if attr not in guesses:
+                guesses[attr] = "UNKNOWN"
+            if attr not in reasoning:
+                reasoning[attr] = "No reasoning provided."
+
+            try:
+                confidence[attr] = float(confidence_values.get(attr, 0.0))
+            except (ValueError, TypeError):
+                confidence[attr] = 0.0
+
+            if (
+                confidence[attr] >= self.confidence_threshold
+                and guesses[attr].strip().upper() != "UNKNOWN"
+            ):
+                successful_attributes.append(attr)
+
+        return AttackerOutput(
+            guesses=guesses,
+            reasoning=reasoning,
+            confidence=confidence,
+            successful_attributes=successful_attributes,
+            raw_response=raw_response,
+        )
+
+    def _build_prompt(self, text: str, target_attributes: list[str]) -> str:
+        """Build the Attacker user prompt for a rewritten text."""
+        attributes_list = "\n".join(f"  - {attr}" for attr in target_attributes)
+        return f"""Analyze the following rewritten text and infer the target attributes.
+
+Target attributes to infer:
+{attributes_list}
+
+Rewritten Text:
+\"\"\"
+{text}
+\"\"\"
+
+Return the result as a valid JSON object matching the requested schema.
+"""
+
+    def _validate_response(
+        self, data: dict[str, object], target_attributes: list[str]
+    ) -> list[str]:
+        """Validate the attacker's structured JSON response."""
+        errors: list[str] = []
+        for key in ("guesses", "reasoning", "confidence"):
+            if key not in data:
+                errors.append(f"Missing '{key}' field.")
+            elif not isinstance(data[key], dict):
+                errors.append(f"'{key}' must be a dictionary.")
+            else:
+                field = data[key]
+                missing = set(target_attributes) - {str(attr) for attr in field}
+                if missing:
+                    errors.append(
+                        f"'{key}' missing target attributes: {', '.join(sorted(missing))}"
+                    )
+                for attr in target_attributes:
+                    value = field.get(attr)
+                    if key in ("guesses", "reasoning") and not isinstance(value, str):
+                        errors.append(f"'{key}.{attr}' must be a string.")
+                    if key == "confidence":
+                        if not isinstance(value, (int, float)):
+                            errors.append(f"'confidence.{attr}' must be a number.")
+                        elif not 0.0 <= float(value) <= 1.0:
+                            errors.append(
+                                f"'confidence.{attr}' must be between 0.0 and 1.0."
+                            )
+        successful = data.get("successful_attributes")
+        if successful is not None and not isinstance(successful, list):
+            errors.append("'successful_attributes' must be a list when provided.")
+        elif isinstance(successful, list):
+            requested = set(target_attributes)
+            for attr in successful:
+                if not isinstance(attr, str):
+                    errors.append("'successful_attributes' entries must be strings.")
+                elif attr not in requested:
+                    errors.append(
+                        f"'successful_attributes' contains unknown attribute '{attr}'."
+                    )
+        return errors
 
     def _call_llm(self, contents: list[str]) -> str:
-        try:
-            return self._send(self._client, contents)
-        except AttackerError as exc:
-            err_str = str(exc)
-            is_rate_limited = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-            is_unavailable = "503" in err_str or "UNAVAILABLE" in err_str
-
-            if (is_rate_limited or is_unavailable) and self._fallback_client:
-                print(
-                    "[attacker] Free tier hit limit, switching to Vertex AI (Cloud credits)...",
-                    file=sys.stderr,
-                )
-                return self._send(self._fallback_client, contents)
-            raise
-
-    def _send(self, client: genai.Client, contents: list[str]) -> str:
-        try:
-            response = client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config={
-                    "max_output_tokens": self.MAX_TOKENS,
-                    "temperature": 0.7,
-                },
-            )
-            text = response.text
-            if not text:
-                raise AttackerError(
-                    "Gemini returned an empty response. The input may be too "
-                    "long or the content may have been blocked."
-                )
-            return text
-        except AttackerError:
-            raise
-        except Exception as exc:
-            raise AttackerError(f"Gemini API error: {exc}") from exc
-
-
-def _parse_attacker_output(raw: str) -> AttackerOutput:
-    """Parse the attacker dictionary-like response into structured data."""
-    text = raw.strip()
-
-    # Try JSON first (in case the model ignores instructions).
-    try:
-        data = json.loads(text)
-        return AttackerOutput(
-            person=_normalize_list(data.get("PERSON")),
-            loc=_normalize_list(data.get("LOC")),
-            org=_normalize_list(data.get("ORG")),
-            date=_normalize_list(data.get("DATE")),
-            text_r=str(data.get("TEXT_R", "")),
-            raw_response=raw,
+        """Send contents to Gemini through the shared client."""
+        return self._llm.generate(
+            contents=contents,
+            system_prompt=_build_system_prompt(self.confidence_threshold),
+            max_output_tokens=self.MAX_TOKENS,
+            temperature=0.7,
         )
-    except Exception:
-        pass
-
-    fields = {
-        "PERSON": [],
-        "LOC": [],
-        "ORG": [],
-        "DATE": [],
-        "TEXT_R": "",
-    }
-
-    for key in ("PERSON", "LOC", "ORG", "DATE", "TEXT_R"):
-        match = re.search(
-            rf"['\"]?{key}['\"]?\s*:\s*(\[.*?\]|\".*?\"|'.*?'|[^,\n\r}}]+)",
-            text,
-            re.DOTALL,
-        )
-        if not match:
-            continue
-        value = match.group(1).strip()
-        if key == "TEXT_R":
-            fields[key] = _strip_quotes(value)
-        else:
-            fields[key] = _parse_list_value(value)
-
-    return AttackerOutput(
-        person=fields["PERSON"],
-        loc=fields["LOC"],
-        org=fields["ORG"],
-        date=fields["DATE"],
-        text_r=fields["TEXT_R"],
-        raw_response=raw,
-    )
-
-
-def _normalize_list(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
-    if isinstance(value, str):
-        return _parse_list_value(value)
-    return [str(value)]
-
-
-def _parse_list_value(value: str) -> list[str]:
-    cleaned = value.strip()
-    if cleaned.startswith("[") and cleaned.endswith("]"):
-        cleaned = cleaned[1:-1].strip()
-    if not cleaned:
-        return []
-
-    # Prefer quoted tokens if present.
-    quoted = re.findall(r"\"([^\"]+)\"|'([^']+)'", cleaned)
-    if quoted:
-        tokens = [q[0] or q[1] for q in quoted]
-        return [t.strip() for t in tokens if t.strip()]
-
-    parts = [p.strip() for p in cleaned.split(",")]
-    return [_strip_quotes(p) for p in parts if _strip_quotes(p)]
-
-
-def _strip_quotes(value: str) -> str:
-    cleaned = value.strip()
-    if (cleaned.startswith("\"") and cleaned.endswith("\"")) or (
-        cleaned.startswith("'") and cleaned.endswith("'")
-    ):
-        cleaned = cleaned[1:-1]
-    return cleaned.strip()

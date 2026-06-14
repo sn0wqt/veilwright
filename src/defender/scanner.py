@@ -3,8 +3,9 @@
 Two-pass detection:
   1. spaCy NER — detects names, locations, orgs, money (reported but NOT masked,
      so the LLM can see them and reason about how to rewrite them)
-  2. Regex — detects emails, phones, dates, credit cards (masked before LLM
-     to prevent leaking raw PII to the API)
+  2. Regex — detects emails, phones, dates, credit cards. Emails, phones,
+     and credit cards are masked before LLM calls; dates are detected but
+     left visible for semantic rewriting.
 """
 
 import re
@@ -112,7 +113,11 @@ def _is_valid_phone(value: str) -> bool:
         parsed = phonenumbers.parse(value.strip(), None)
         return phonenumbers.is_possible_number(parsed)
     except phonenumbers.NumberParseException:
-        return False
+        try:
+            parsed = phonenumbers.parse(value.strip(), "US")
+            return phonenumbers.is_possible_number(parsed)
+        except phonenumbers.NumberParseException:
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +148,7 @@ def scan_text(text: str) -> ScanResult:
                     replacement=replacement, mask=should_mask,
                 ))
 
-    # --- Pass 2: regex (detect AND mask) ---
+    # --- Pass 2: regex ---
 
     # emails
     for m in _EMAIL_RE.finditer(text):
@@ -194,16 +199,18 @@ def scan_text(text: str) -> ScanResult:
 
 
 def _deduplicate_spans(matches: list[PIIMatch]) -> list[PIIMatch]:
-    """Remove overlapping PII matches, keeping the longest span."""
+    """Remove overlapping PII matches, keeping maskable direct PII first."""
     if not matches:
         return []
 
-    sorted_matches = sorted(matches, key=lambda m: (m.start, -(m.end - m.start)))
+    sorted_matches = sorted(
+        matches,
+        key=lambda m: (not m.mask, -(m.end - m.start), m.start),
+    )
 
-    result: list[PIIMatch] = [sorted_matches[0]]
-    for current in sorted_matches[1:]:
-        prev = result[-1]
-        if current.start >= prev.end:
-            result.append(current)
+    kept: list[PIIMatch] = []
+    for current in sorted_matches:
+        if all(current.end <= prev.start or current.start >= prev.end for prev in kept):
+            kept.append(current)
 
-    return result
+    return sorted(kept, key=lambda m: (m.start, m.end))

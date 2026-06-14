@@ -10,13 +10,13 @@ This project is part of a three-agent adversarial system:
 2. **Attacker** — receives the rewritten text and tries to guess the hidden attributes
 3. **Utility Judge** — scores how much of the original meaning was preserved
 
-The system runs as an adversarial loop: if the Attacker guesses correctly, the Defender retries with a heavier rewrite, until the Attacker fails but the Utility Judge still gives a passing score.
+The system runs as an adversarial loop until privacy and utility pass in the same iteration. If the Attacker guesses correctly, the Defender retries with stronger anonymization for the leaked attributes. If privacy passes but utility is too low, the Defender retries with lighter-touch preservation of non-sensitive meaning.
 
 ## How It Works
 
 The Defender uses a two-pass pipeline:
 
-1. **Syntactic scanner** — regex-based detection of explicit PII (emails, phone numbers, dates, credit card numbers, `<PERSON>` tags). These are masked before reaching the LLM.
+1. **Syntactic scanner** — spaCy NER plus regex detection. Direct identifiers such as names, emails, phone numbers, and credit card numbers are masked before reaching the LLM. Contextual clues such as dates, locations, organizations, and money are detected but usually left visible so the LLM can rewrite them semantically.
 2. **Semantic rewriting** — a Gemini LLM applies one of three strategies per target attribute:
    - **Abstraction** — replace specific clues with vaguer equivalents (e.g. "moon landing" → "historic space event")
    - **Shifting** — replace clues with plausible but different references
@@ -33,22 +33,29 @@ The full adversarial loop also includes:
 # Install uv if you haven't already
 pip install uv
 
-# Sync dependencies
+# Sync dependencies, including dev tools and the spaCy model
 uv sync --extra dev
-
-# Download the spaCy NER model
-uv pip install en_core_web_lg@https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
 ```
 
 ## Configuration
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root. For Google AI Studio:
 
 ```text
 GEMINI_API_KEY=your-api-key-here
 ```
 
 Get your API key from [Google AI Studio](https://aistudio.google.com/) → Get API key.
+
+For Vertex AI fallback with Google Cloud credits, add:
+
+```text
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json
+GOOGLE_CLOUD_PROJECT=your-project-id
+GOOGLE_CLOUD_LOCATION=global
+```
+
+If both are configured, Defender uses AI Studio first and automatically switches to Vertex AI when the primary client is rate-limited or unavailable.
 
 ## Usage
 
@@ -60,7 +67,7 @@ defender --help
 defender anonymize --help
 ```
 
-### Defend (Anonymize Text)
+### Anonymize (Single Pass)
 
 Inline text:
 
@@ -77,19 +84,25 @@ defender anonymize --file input.txt --attributes "Age,Birth Year,Exact Event"
 With a specific model:
 
 ```bash
-defender anonymize --text "..." --attributes "Age" --model gemini-2.5-pro
+defender anonymize --text "I was six years old during the moon landing." --attributes "Age" --model gemini-2.5-pro
 ```
 
 JSON output (for machine-to-machine communication):
 
 ```bash
-defender anonymize --text "..." --attributes "Age" --json
+defender anonymize --text "I was six years old during the moon landing." --attributes "Age" --json
 ```
 
 ### Adversarial Loop (Defender + Attacker + Utility Judge)
 
 ```bash
-defender adversarial --text "I remember watching a historic space event with my father..." --attributes "Age,Birth Year,Exact Event" --iterations 3 --json
+defender adversarial --text "I remember watching the moon landing with my father when I was six years old." --attributes "Age,Birth Year,Exact Event" --iterations 3 --json
+```
+
+Readable terminal summary:
+
+```bash
+defender adversarial --text "I remember watching the moon landing with my father when I was six years old." --attributes "Age,Birth Year,Exact Event" --iterations 3 --no-json
 ```
 
 Save a JSON report file:
@@ -101,8 +114,10 @@ defender adversarial --file input.txt --attributes "Age,Birth Year,Exact Event" 
 You can customize models and utility threshold:
 
 ```bash
-defender adversarial --text "..." --attributes "Age" --defender-model gemini-2.5-flash --attacker-model gemini-3-flash-preview --utility-model gemini-2.5-flash --utility-threshold 0.75 --json
+defender adversarial --text "I started residency after medical school and now lead a hospital clinic." --attributes "Profession" --defender-model gemini-2.5-flash --attacker-model gemini-3-flash-preview --utility-model gemini-2.5-flash --utility-threshold 0.75 --confidence-threshold 0.7 --json
 ```
+
+An attacker guess counts as a privacy failure only when it fuzzy-matches the ground truth and the attacker's confidence is at least the configured confidence threshold. The default is `0.7`, chosen to be privacy-sensitive for plausible semantic leaks.
 
 ### List Available Models
 
@@ -118,7 +133,7 @@ The Defender exposes a clean interface for integration with the Attacker and Uti
 from defender import run_defender, DefenderInput
 
 result = run_defender(DefenderInput(
-    text="I remember watching the moon landing...",
+    text="I remember watching the moon landing with my father.",
     target_attributes=["Age", "Birth Year", "Exact Event"],
 ))
 
@@ -131,7 +146,7 @@ For the adversarial loop (with Attacker feedback):
 
 ```python
 result = run_defender(DefenderInput(
-    text="I remember watching the moon landing...",
+    text="I remember watching the moon landing with my father.",
     target_attributes=["Age", "Birth Year"],
     iteration=2,
     attacker_feedback="The narrator watched the moon landing at age 6, so born ~1963.",
@@ -149,11 +164,12 @@ src/defender/
 ├── __main__.py      # CLI entry point
 ├── attacker.py      # Attacker prompt + parsing logic
 ├── defender.py      # Core pipeline: scanner → LLM → parse
+├── llm_client.py    # Shared Gemini client + Vertex fallback wrapper
 ├── orchestrator.py  # Adversarial loop runner
-├── prompts.py       # System prompt, user prompt builder, retry prompt
-├── scanner.py       # Regex-based PII detection + masking
+├── prompts.py       # System prompts, user prompt builders, retry prompts
+├── scanner.py       # spaCy + regex PII detection and masking
 ├── strategies.py    # RewriteStrategy enum + descriptions
-├── types.py         # DefenderInput, DefenderOutput, StrategyRecord
+├── types.py         # Shared dataclasses for all agents and loop results
 ├── utility.py       # Utility Judge scorer
 └── utils.py         # JSON extraction + response validation
 ```

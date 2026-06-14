@@ -1,12 +1,6 @@
 """Core Defender agent logic."""
 
-import json
-import os
-import sys
-
-from dotenv import load_dotenv
-from google import genai
-
+from defender.llm_client import GeminiClient
 from defender.prompts import (
     REWRITE_SYSTEM_PROMPT,
     ANALYSIS_SYSTEM_PROMPT,
@@ -17,9 +11,11 @@ from defender.prompts import (
 )
 from defender.scanner import scan_text
 from defender.types import DefenderInput, DefenderOutput, StrategyRecord
-from defender.utils import parse_llm_json, validate_defender_response
-
-load_dotenv()
+from defender.utils import (
+    parse_llm_json,
+    parse_validated_llm_json,
+    validate_defender_response,
+)
 
 
 class DefenderError(Exception):
@@ -34,41 +30,20 @@ class Defender:
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self.model = model or self.DEFAULT_MODEL
-        self._client: genai.Client | None = None
-        self._fallback_client: genai.Client | None = None
-
-        # Primary: AI Studio (free tier)
-        resolved_key = api_key or os.environ.get("GEMINI_API_KEY")
-        if resolved_key:
-            self._client = genai.Client(api_key=resolved_key)
-
-        # Fallback: Vertex AI (Cloud credits)
-        credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if credentials_path and project_id:
-            location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
-            self._fallback_client = genai.Client(
-                vertexai=True,
-                project=project_id,
-                location=location,
-            )
-
-        # If no primary, promote fallback
-        if self._client is None and self._fallback_client is not None:
-            self._client = self._fallback_client
-            self._fallback_client = None
-        elif self._client is None:
-            raise DefenderError(
-                "No credentials found. Set GEMINI_API_KEY for AI Studio, "
-                "or GOOGLE_APPLICATION_CREDENTIALS + GOOGLE_CLOUD_PROJECT "
-                "for Vertex AI."
-            )
+        self._llm = GeminiClient(
+            model=self.model,
+            label="defender",
+            error_type=DefenderError,
+            api_key=api_key,
+        )
 
     def run(self, defender_input: DefenderInput) -> DefenderOutput:
         """Run the full Defender pipeline on the given input."""
 
         if not defender_input.text.strip():
             raise DefenderError("Input text is empty.")
+        if not defender_input.target_attributes:
+            raise DefenderError("At least one target attribute is required.")
 
         estimated_tokens = len(defender_input.text) // 4
         if estimated_tokens > 6000:
@@ -78,8 +53,9 @@ class Defender:
             )
 
         # --- Step 1: auto-extract ground truth if caller didn't provide it ---
-        if defender_input.iteration == 1 and not defender_input.ground_truth and defender_input.target_attributes:
-            defender_input.ground_truth = self.extract_ground_truth(
+        ground_truth = dict(defender_input.ground_truth)
+        if defender_input.iteration == 1 and not ground_truth:
+            ground_truth = self.extract_ground_truth(
                 defender_input.text, defender_input.target_attributes
             )
 
@@ -96,7 +72,7 @@ class Defender:
         # --- Step 3: clue enumeration pre-pass (iteration 1 only) ---
         # On retries the attacker_feedback already tells us what clues slipped through,
         # so we don't need to re-enumerate from scratch.
-        clue_map: dict = {}
+        clue_map: dict[str, list[dict[str, str]]] = {}
         if defender_input.iteration == 1 and defender_input.target_attributes:
             clue_map = self._enumerate_clues(text_for_llm, defender_input.target_attributes)
 
@@ -114,43 +90,36 @@ class Defender:
         llm_response_text = self._call_llm(contents)
 
         # --- Step 6: parse and validate ---
-        needs_retry = False
-        try:
-            parsed = parse_llm_json(llm_response_text)
-            errors = validate_defender_response(parsed, defender_input.target_attributes)
-            if errors:
-                needs_retry = True
-        except json.JSONDecodeError:
-            needs_retry = True
-
-        if needs_retry:
-            # retry once with stricter prompt
-            retry_text = self._call_llm([user_prompt, RETRY_PROMPT])
-
-            try:
-                parsed = parse_llm_json(retry_text)
-                errors = validate_defender_response(parsed, defender_input.target_attributes)
-                if errors:
-                    raise DefenderError(
-                        f"LLM response failed validation after retry: {errors}"
-                    )
-            except json.JSONDecodeError as exc:
-                raise DefenderError(
-                    f"Failed to parse LLM JSON after retry: {exc}"
-                ) from exc
+        parsed = parse_validated_llm_json(
+            initial_text=llm_response_text,
+            retry=lambda: self._call_llm([user_prompt, RETRY_PROMPT]),
+            validate=lambda data: validate_defender_response(
+                data, defender_input.target_attributes
+            ),
+            error_type=DefenderError,
+            parse_error_message="Failed to parse LLM JSON after retry: {error}",
+            validation_error_message="LLM response failed validation after retry: {errors}",
+        )
 
         # --- Step 7: build output ---
-        strategies = [StrategyRecord.from_dict(s) for s in parsed["strategies_used"]]
+        strategies = [
+            StrategyRecord.from_dict(s)
+            for s in parsed["strategies_used"]
+            if isinstance(s, dict)
+        ]
+
+        rewritten_text = parsed["rewritten_text"]
+        assert isinstance(rewritten_text, str)
 
         return DefenderOutput(
             original_text=defender_input.text,
-            rewritten_text=parsed["rewritten_text"],
+            rewritten_text=rewritten_text,
             target_attributes=defender_input.target_attributes,
             strategies_used=strategies,
             confidence=float(parsed["confidence"]),
             iteration=defender_input.iteration,
             syntactic_pii_found=syntactic_pii,
-            ground_truth=defender_input.ground_truth,
+            ground_truth=ground_truth,
             clue_map=clue_map,
         )
 
@@ -169,18 +138,23 @@ class Defender:
         try:
             response = self._call_llm([prompt], system_prompt=ANALYSIS_SYSTEM_PROMPT)
             parsed = parse_llm_json(response)
-            return {
-                k: str(v)
-                for k, v in parsed.get("ground_truth", {}).items()
-                if v is not None
-            }
+            ground_truth = parsed.get("ground_truth", {})
+            if not isinstance(ground_truth, dict):
+                return {}
+            by_lower = {str(key).lower(): value for key, value in ground_truth.items()}
+            result: dict[str, str] = {}
+            for attr in target_attributes:
+                value = ground_truth.get(attr, by_lower.get(attr.lower()))
+                if value is not None:
+                    result[attr] = str(value)
+            return result
         except Exception:
             # non-fatal — orchestrator can still run without ground truth
             return {}
 
     def _enumerate_clues(
         self, text: str, target_attributes: list[str]
-    ) -> dict:
+    ) -> dict[str, list[dict[str, str]]]:
         """Pre-pass: map every inference chain that could reveal a target attribute.
 
         The result is injected into the rewrite prompt as an explicit checklist,
@@ -193,49 +167,44 @@ class Defender:
         try:
             response = self._call_llm([prompt], system_prompt=ANALYSIS_SYSTEM_PROMPT)
             parsed = parse_llm_json(response)
-            return parsed.get("clue_map", {})
+            clue_map = parsed.get("clue_map", {})
+            return _normalize_clue_map(clue_map, target_attributes)
         except Exception:
             # non-fatal — rewrite will still run, just without the explicit checklist
             return {}
 
     def _call_llm(self, contents: list[str], system_prompt: str = REWRITE_SYSTEM_PROMPT) -> str:
         """Send contents to the Gemini API, falling back to Vertex on rate limits."""
-        try:
-            return self._send(self._client, contents, system_prompt)
-        except DefenderError as exc:
-            # Check for rate-limit (429) or overload (503)
-            err_str = str(exc)
-            is_rate_limited = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-            is_unavailable = "503" in err_str or "UNAVAILABLE" in err_str
+        return self._llm.generate(
+            contents=contents,
+            system_prompt=system_prompt,
+            max_output_tokens=self.MAX_TOKENS,
+            temperature=0.7,
+        )
 
-            if (is_rate_limited or is_unavailable) and self._fallback_client:
-                print(
-                    "[defender] Free tier hit limit, switching to Vertex AI (Cloud credits)...",
-                    file=sys.stderr,
-                )
-                return self._send(self._fallback_client, contents, system_prompt)
-            raise
 
-    def _send(self, client: genai.Client, contents: list[str], system_prompt: str) -> str:
-        """Send a request using a specific genai client."""
-        try:
-            response = client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config={
-                    "system_instruction": system_prompt,
-                    "max_output_tokens": self.MAX_TOKENS,
-                    "temperature": 0.7,
-                },
-            )
-            text = response.text
-            if not text:
-                raise DefenderError(
-                    "Gemini returned an empty response. The input may be too "
-                    "long or the content may have been blocked."
-                )
-            return text
-        except DefenderError:
-            raise
-        except Exception as exc:
-            raise DefenderError(f"Gemini API error: {exc}") from exc
+def _normalize_clue_map(
+    clue_map: object,
+    target_attributes: list[str],
+) -> dict[str, list[dict[str, str]]]:
+    """Keep clue-map data only for requested attributes and coerce values to strings."""
+    if not isinstance(clue_map, dict):
+        return {}
+
+    by_lower = {str(key).lower(): value for key, value in clue_map.items()}
+    normalized: dict[str, list[dict[str, str]]] = {}
+    for attr in target_attributes:
+        raw_clues = clue_map.get(attr, by_lower.get(attr.lower(), []))
+        if not isinstance(raw_clues, list):
+            normalized[attr] = []
+            continue
+        normalized[attr] = [
+            {
+                "clue": str(clue.get("clue", "")),
+                "type": str(clue.get("type", "")),
+                "inference": str(clue.get("inference", "")),
+            }
+            for clue in raw_clues
+            if isinstance(clue, dict)
+        ]
+    return normalized
