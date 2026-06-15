@@ -1,4 +1,4 @@
-"""Shared type definitions for the Defender agent."""
+"""Shared type definitions for Veilwright agents and workflows."""
 
 from dataclasses import dataclass, field
 

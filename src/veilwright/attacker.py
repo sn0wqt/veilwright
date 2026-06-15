@@ -2,9 +2,9 @@
 
 from json import JSONDecodeError
 
-from defender.llm_client import GeminiClient
-from defender.types import AttackerOutput
-from defender.utils import parse_llm_json, parse_validated_llm_json
+from veilwright.llm_client import GeminiClient
+from veilwright.types import AttackerOutput
+from veilwright.utils import parse_llm_json, parse_validated_llm_json
 
 
 def _build_system_prompt(confidence_threshold: float) -> str:

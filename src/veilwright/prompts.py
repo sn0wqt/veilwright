@@ -12,7 +12,7 @@ Exports:
     build_utility_prompt          — utility judge scoring instruction
 """
 
-from defender.strategies import STRATEGY_DESCRIPTIONS, RewriteStrategy
+from veilwright.strategies import STRATEGY_DESCRIPTIONS, RewriteStrategy
 
 
 REWRITE_SYSTEM_PROMPT = """\

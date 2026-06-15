@@ -1,7 +1,7 @@
 """Core Defender agent logic."""
 
-from defender.llm_client import GeminiClient
-from defender.prompts import (
+from veilwright.llm_client import GeminiClient
+from veilwright.prompts import (
     REWRITE_SYSTEM_PROMPT,
     ANALYSIS_SYSTEM_PROMPT,
     RETRY_PROMPT,
@@ -9,9 +9,9 @@ from defender.prompts import (
     build_ground_truth_prompt,
     build_rewrite_prompt,
 )
-from defender.scanner import scan_text
-from defender.types import DefenderInput, DefenderOutput, StrategyRecord
-from defender.utils import (
+from veilwright.scanner import scan_text
+from veilwright.types import DefenderInput, DefenderOutput, StrategyRecord
+from veilwright.utils import (
     parse_llm_json,
     parse_validated_llm_json,
     validate_defender_response,
@@ -220,3 +220,15 @@ def _stringify_ground_truth_value(value: object) -> str:
             f"{key}: {item}" for key, item in value.items() if item is not None
         )
     return str(value)
+
+
+def run_anonymizer(
+    defender_input: DefenderInput,
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+) -> DefenderOutput:
+    """Run one semantic anonymization pass through the Defender agent."""
+    defender = Defender(api_key=api_key, model=model)
+    return defender.run(defender_input)
+

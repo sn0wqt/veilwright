@@ -139,10 +139,6 @@ def _is_false_positive_person(value: str, text: str, start: int) -> bool:
     return prefix.endswith("the ")
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def scan_text(text: str) -> ScanResult:
     """Scan free text for PII and return a masked version.
 

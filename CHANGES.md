@@ -10,9 +10,9 @@ This document summarizes the feedback received during the poster session and how
 
 We did not build a separate service wrapper because this project is a research proof-of-concept, and the feedback itself noted that a wrapper was probably not necessary for evaluation. Instead, we exposed the core functionality through simple interfaces:
 
-- `run_defender()` for a single anonymization pass.
+- `run_anonymizer()` / `run_defender()` for a single anonymization pass.
 - `run_adversarial_loop()` for the full Defender/Attacker/Utility Judge loop.
-- `defender anonymize` and `defender adversarial` CLI commands for manual testing.
+- `veilwright anonymize` and `veilwright adversarial` CLI commands for manual testing.
 - `README.md` documenting setup, configuration, CLI usage, API usage, and the
   main output fields.
 
@@ -52,7 +52,7 @@ The proof-of-concept now includes a complete automated adversarial loop:
 The loop can be run with:
 
 ```bash
-defender adversarial --text "..." --attributes "Age,Birth Year,Exact Event" --iterations 5 --no-json
+veilwright adversarial --text "..." --attributes "Age,Birth Year,Exact Event" --iterations 5 --no-json
 ```
 
 ## 4. Add concrete per-iteration results and more diverse examples

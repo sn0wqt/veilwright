@@ -4,7 +4,7 @@ from collections.abc import Callable
 import json
 import re
 
-from defender.strategies import VALID_STRATEGY_NAMES
+from veilwright.strategies import VALID_STRATEGY_NAMES
 
 _MONTHS: dict[str, int] = {
     "jan": 1,

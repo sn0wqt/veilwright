@@ -2,7 +2,8 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-from defender.utils import (
+from veilwright import run_anonymizer
+from veilwright.utils import (
     _compare_guess_to_ground_truth,
     _date_tuple,
     _parse_date_value,
@@ -12,7 +13,7 @@ from defender.utils import (
     validate_defender_response,
     validate_utility_response,
 )
-from defender.types import (
+from veilwright.types import (
     AdversarialIteration,
     AdversarialResult,
     AttackerOutput,
@@ -22,27 +23,27 @@ from defender.types import (
     UtilityInput,
     UtilityOutput,
 )
-from defender.attacker import (
+from veilwright.attacker import (
     Attacker,
     AttackerError,
     _build_repair_prompt,
     _build_system_prompt,
 )
-from defender.defender import Defender, DefenderError, _normalize_clue_map, _stringify_ground_truth_value
-from defender.llm_client import GeminiClient
-from defender.orchestrator import (
+from veilwright.defender import Defender, DefenderError, _normalize_clue_map, _stringify_ground_truth_value
+from veilwright.llm_client import GeminiClient
+from veilwright.orchestrator import (
     run_adversarial_loop,
     _build_attacker_feedback,
     _build_iteration_feedback,
     _verified_successful_attributes,
 )
-from defender.prompts import (
+from veilwright.prompts import (
     build_clue_enumeration_prompt,
     build_ground_truth_prompt,
     build_rewrite_prompt,
     build_utility_prompt,
 )
-from defender.scanner import (
+from veilwright.scanner import (
     PIIMatch,
     _deduplicate_spans,
     _is_false_positive_person,
@@ -50,8 +51,8 @@ from defender.scanner import (
     _luhn_check,
     scan_text,
 )
-from defender.strategies import RewriteStrategy, VALID_STRATEGY_NAMES
-from defender.utility import UtilityError, UtilityJudge
+from veilwright.strategies import RewriteStrategy, VALID_STRATEGY_NAMES
+from veilwright.utility import UtilityError, UtilityJudge
 
 
 class TestUtils(unittest.TestCase):
@@ -468,6 +469,27 @@ class TestTypes(unittest.TestCase):
         self.assertEqual(len(restored.iterations), 1)
 
 
+class TestPublicApi(unittest.TestCase):
+    @patch("veilwright.defender.Defender")
+    def test_run_anonymizer_delegates_to_defender(self, mock_defender_cls: MagicMock) -> None:
+        defender_input = DefenderInput(text="Text", target_attributes=["Age"])
+        defender_output = DefenderOutput(
+            original_text="Text",
+            rewritten_text="Rewritten",
+            target_attributes=["Age"],
+            strategies_used=[],
+            confidence=0.9,
+            iteration=1,
+        )
+        mock_defender = mock_defender_cls.return_value
+        mock_defender.run.return_value = defender_output
+
+        result = run_anonymizer(defender_input, api_key="api-key", model="gemini-test")
+
+        self.assertIs(result, defender_output)
+        mock_defender_cls.assert_called_once_with(api_key="api-key", model="gemini-test")
+        mock_defender.run.assert_called_once_with(defender_input)
+
 class TestDefender(unittest.TestCase):
     def test_extract_ground_truth_includes_income(self) -> None:
         defender = Defender(api_key="fake_key")
@@ -561,7 +583,7 @@ class TestDefender(unittest.TestCase):
 
 
 class TestAttacker(unittest.TestCase):
-    @patch("defender.llm_client.genai.Client")
+    @patch("veilwright.llm_client.genai.Client")
     def test_attacker_run_success(self, mock_client_cls: MagicMock) -> None:
         mock_client = MagicMock()
         mock_response = MagicMock()
@@ -667,8 +689,8 @@ class TestGeminiClient(unittest.TestCase):
             "GOOGLE_CLOUD_PROJECT": "demo-project",
         },
     )
-    @patch("defender.llm_client.os.path.exists", return_value=True)
-    @patch("defender.llm_client.genai.Client")
+    @patch("veilwright.llm_client.os.path.exists", return_value=True)
+    @patch("veilwright.llm_client.genai.Client")
     def test_fallback_switches_to_vertex_after_rate_limit(
         self,
         mock_client_cls: MagicMock,
@@ -709,7 +731,7 @@ class TestGeminiClient(unittest.TestCase):
         mock_exists.assert_called()
 
     @patch.dict("os.environ", {"GEMINI_API_KEY": "studio-key"}, clear=True)
-    @patch("defender.llm_client.genai.Client")
+    @patch("veilwright.llm_client.genai.Client")
     def test_retries_empty_response(self, mock_client_cls: MagicMock) -> None:
         class DummyError(Exception):
             """Test-specific Gemini wrapper error."""
@@ -839,9 +861,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("Apply lighter-touch strategies", prompt)
         self.assertNotIn("MUST apply a heavier rewrite", prompt)
 
-    @patch("defender.orchestrator.Defender")
-    @patch("defender.orchestrator.Attacker")
-    @patch("defender.orchestrator.UtilityJudge")
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
     def test_run_adversarial_loop_success(
         self,
         mock_judge_cls: MagicMock,
@@ -897,9 +919,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(result.final_utility_score, 0.8)
         self.assertEqual(result.ground_truth["Age"], "46")
 
-    @patch("defender.orchestrator.Defender")
-    @patch("defender.orchestrator.Attacker")
-    @patch("defender.orchestrator.UtilityJudge")
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
     def test_run_adversarial_loop_max_iterations_reached(
         self,
         mock_judge_cls: MagicMock,
@@ -957,9 +979,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(result.total_iterations, 2)
         self.assertEqual(result.iterations[-1].attacker_output.successful_attributes, ["Age"])
 
-    @patch("defender.orchestrator.Defender")
-    @patch("defender.orchestrator.Attacker")
-    @patch("defender.orchestrator.UtilityJudge")
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
     def test_run_adversarial_loop_uses_custom_confidence_threshold(
         self,
         mock_judge_cls: MagicMock,
@@ -1008,9 +1030,9 @@ class TestOrchestrator(unittest.TestCase):
         mock_attacker_cls.assert_called_once()
         self.assertEqual(mock_attacker_cls.call_args.kwargs["confidence_threshold"], 0.8)
 
-    @patch("defender.orchestrator.Defender")
-    @patch("defender.orchestrator.Attacker")
-    @patch("defender.orchestrator.UtilityJudge")
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
     def test_run_adversarial_loop_utility_too_low_at_max(
         self,
         mock_judge_cls: MagicMock,
@@ -1056,9 +1078,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(result.exit_reason, "utility_too_low_at_max")
         self.assertEqual(result.total_iterations, 2)
 
-    @patch("defender.orchestrator.Defender")
-    @patch("defender.orchestrator.Attacker")
-    @patch("defender.orchestrator.UtilityJudge")
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
     def test_ground_truth_is_carried_forward_after_iteration_one(
         self,
         mock_judge_cls: MagicMock,
@@ -1519,7 +1541,7 @@ class TestGeminiClientEdgeCases(unittest.TestCase):
     """Edge case tests for GeminiClient."""
 
     @patch.dict("os.environ", {"GEMINI_API_KEY": "studio-key"}, clear=True)
-    @patch("defender.llm_client.genai.Client")
+    @patch("veilwright.llm_client.genai.Client")
     def test_empty_response_exhaustion_raises(self, mock_client_cls: MagicMock) -> None:
         """After EMPTY_RESPONSE_ATTEMPTS empty responses, raises error."""
 

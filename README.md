@@ -1,10 +1,10 @@
-# Adversarial Anonymization System (Defender)
+# Veilwright
 
-An end-to-end multi-agent semantic text anonymization system featuring three collaborative agents: a **Defender** that anonymizes text, an **Attacker** that attempts to de-anonymize target attributes, and a **Utility Judge** that scores meaning preservation.
+Veilwright is an end-to-end multi-agent semantic text anonymization system. It features three collaborative agents: a **Defender** that rewrites sensitive text, an **Attacker** that attempts to de-anonymize target attributes, and a **Utility Judge** that scores meaning preservation.
 
 ## System Overview
 
-The `defender` CLI is the entry point for the complete proof-of-concept:
+The `veilwright` CLI is the entry point for the complete proof-of-concept:
 
 1. **Defender** — rewrites text to hide target attributes
 2. **Attacker** — receives the rewritten text and tries to guess the hidden attributes
@@ -107,10 +107,10 @@ Do not submit real `.env` files or service-account JSON keys. They are intention
 
 ```bash
 # View all available commands
-uv run defender --help
+uv run veilwright --help
 
 # View help for a specific command
-uv run defender anonymize --help
+uv run veilwright anonymize --help
 ```
 
 ### Anonymize (Single Pass)
@@ -118,49 +118,49 @@ uv run defender anonymize --help
 Inline text:
 
 ```bash
-uv run defender anonymize --text "I remember watching the moon landing with my father. It was a huge event to see Neil Armstrong become the first man on the Moon. Funnily enough, this is the only specific memory I have from when I was six years old." --attributes "Age,Birth Year,Exact Event"
+uv run veilwright anonymize --text "I remember watching the moon landing with my father. It was a huge event to see Neil Armstrong become the first man on the Moon. Funnily enough, this is the only specific memory I have from when I was six years old." --attributes "Age,Birth Year,Exact Event"
 ```
 
 From a file:
 
 ```bash
-uv run defender anonymize --file input.txt --attributes "Age,Birth Year,Exact Event"
+uv run veilwright anonymize --file input.txt --attributes "Age,Birth Year,Exact Event"
 ```
 
 With a specific model:
 
 ```bash
-uv run defender anonymize --text "I was six years old during the moon landing." --attributes "Age" --model gemini-2.5-pro
+uv run veilwright anonymize --text "I was six years old during the moon landing." --attributes "Age" --model gemini-2.5-pro
 ```
 
 JSON output (for machine-to-machine communication):
 
 ```bash
-uv run defender anonymize --text "I was six years old during the moon landing." --attributes "Age" --json
+uv run veilwright anonymize --text "I was six years old during the moon landing." --attributes "Age" --json
 ```
 
 ### Adversarial Loop (Defender + Attacker + Utility Judge)
 
 ```bash
-uv run defender adversarial --text "I remember watching the moon landing with my father when I was six years old." --attributes "Age,Birth Year,Exact Event" --iterations 3 --json
+uv run veilwright adversarial --text "I remember watching the moon landing with my father when I was six years old." --attributes "Age,Birth Year,Exact Event" --iterations 3 --json
 ```
 
 Readable terminal summary:
 
 ```bash
-uv run defender adversarial --text "I remember watching the moon landing with my father when I was six years old." --attributes "Age,Birth Year,Exact Event" --iterations 3 --no-json
+uv run veilwright adversarial --text "I remember watching the moon landing with my father when I was six years old." --attributes "Age,Birth Year,Exact Event" --iterations 3 --no-json
 ```
 
 Save a JSON report file:
 
 ```bash
-uv run defender adversarial --file input.txt --attributes "Age,Birth Year,Exact Event" --iterations 3 --json --out report.json
+uv run veilwright adversarial --file input.txt --attributes "Age,Birth Year,Exact Event" --iterations 3 --json --out report.json
 ```
 
 You can customize models and utility threshold:
 
 ```bash
-uv run defender adversarial --text "I started residency after medical school and now lead a hospital clinic." --attributes "Profession" --defender-model gemini-2.5-flash --attacker-model gemini-2.5-flash --utility-model gemini-2.5-flash --utility-threshold 0.75 --confidence-threshold 0.7 --json
+uv run veilwright adversarial --text "I started residency after medical school and now lead a hospital clinic." --attributes "Profession" --defender-model gemini-2.5-flash --attacker-model gemini-2.5-flash --utility-model gemini-2.5-flash --utility-threshold 0.75 --confidence-threshold 0.7 --json
 ```
 
 An attacker guess counts as a privacy failure only when it fuzzy-matches the ground truth and the attacker's confidence is at least the configured confidence threshold. The default is `0.7`, chosen to be privacy-sensitive for plausible semantic leaks.
@@ -168,7 +168,7 @@ An attacker guess counts as a privacy failure only when it fuzzy-matches the gro
 ### List Available Models
 
 ```bash
-uv run defender models
+uv run veilwright models
 ```
 
 ## Python API
@@ -176,9 +176,9 @@ uv run defender models
 Single-pass anonymization:
 
 ```python
-from defender import run_defender, DefenderInput
+from veilwright import run_anonymizer, DefenderInput
 
-result = run_defender(DefenderInput(
+result = run_anonymizer(DefenderInput(
     text="I remember watching the moon landing with my father.",
     target_attributes=["Age", "Birth Year", "Exact Event"],
 ))
@@ -191,7 +191,7 @@ print(result.confidence)
 Full adversarial loop:
 
 ```python
-from defender import run_adversarial_loop
+from veilwright import run_adversarial_loop
 
 result = run_adversarial_loop(
     text="I remember watching the moon landing with my father.",
@@ -218,11 +218,11 @@ Important result fields:
 ## Project Structure
 
 ```text
-src/defender/
-├── __init__.py      # Top-level API: run_defender()
+src/veilwright/
+├── __init__.py      # Public exports
 ├── __main__.py      # CLI entry point
 ├── attacker.py      # Attacker prompt + parsing logic
-├── defender.py      # Core pipeline: scanner → LLM → parse
+├── defender.py      # Core pipeline + single-pass helper: run_anonymizer()
 ├── llm_client.py    # Shared Gemini client + Vertex fallback wrapper
 ├── orchestrator.py  # Adversarial loop runner
 ├── prompts.py       # System prompts, user prompt builders, retry prompts

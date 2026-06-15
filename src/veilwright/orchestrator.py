@@ -1,16 +1,16 @@
 """End-to-end adversarial loop: Defender -> Attacker -> Utility Judge."""
 
-from defender.attacker import Attacker
-from defender.defender import Defender
-from defender.types import (
+from veilwright.attacker import Attacker
+from veilwright.defender import Defender
+from veilwright.types import (
     AdversarialIteration,
     AdversarialResult,
     AttackerOutput,
     DefenderInput,
     UtilityInput,
 )
-from defender.utility import UtilityJudge
-from defender.utils import is_guess_correct
+from veilwright.utility import UtilityJudge
+from veilwright.utils import is_guess_correct
 
 
 def run_adversarial_loop(

@@ -1,4 +1,4 @@
-"""CLI entry point for the Defender semantic anonymization toolkit."""
+"""CLI entry point for the Veilwright semantic anonymization toolkit."""
 
 import json
 import os
@@ -13,18 +13,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from defender.defender import Defender, DefenderError
-from defender.attacker import Attacker, AttackerError
-from defender.utility import UtilityError
-from defender.orchestrator import run_adversarial_loop
-from defender.types import DefenderInput, DefenderOutput, AdversarialResult
-from defender.utils import is_guess_correct
+from veilwright.defender import Defender, DefenderError, run_anonymizer
+from veilwright.attacker import Attacker, AttackerError
+from veilwright.utility import UtilityJudge, UtilityError
+from veilwright.orchestrator import run_adversarial_loop
+from veilwright.types import DefenderInput, DefenderOutput, AdversarialResult
+from veilwright.utils import is_guess_correct
 
 load_dotenv()
 
 app = typer.Typer(
-    name="defender",
-    help="Adversarial multi-agent semantic anonymization system (Defender, Attacker, Utility Judge).",
+    name="veilwright",
+    help="Veilwright: adversarial multi-agent semantic anonymization.",
     add_completion=False,
 )
 console = Console()
@@ -144,7 +144,7 @@ def defend(
         1,
         "--iterations",
         "-n",
-        help="Number of defender iterations to run.",
+        help="Number of Defender rewrite iterations for this single-agent command.",
         min=1,
     ),
     model: str = typer.Option(
@@ -176,12 +176,6 @@ def defend(
     resolved_text = _resolve_text_input(text, file)
     attr_list = _parse_attributes(attributes)
 
-    try:
-        defender = Defender(model=model)
-    except DefenderError as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-        raise typer.Exit(code=1)
-
     # ground truth is extracted once on iteration 1 then carried forward so
     # every iteration in the output shows the same consistent values
     ground_truth: dict[str, str] = {}
@@ -198,7 +192,7 @@ def defend(
         )
 
         try:
-            result = defender.run(defender_input)
+            result = run_anonymizer(defender_input, model=model)
         except DefenderError as exc:
             console.print(f"[bold red]Defender error:[/bold red] {exc}")
             raise typer.Exit(code=1)
@@ -306,7 +300,7 @@ def adversarial_loop(
         min=1,
     ),
     defender_model: str = typer.Option(
-        "gemini-2.5-flash",
+        Defender.DEFAULT_MODEL,
         "--defender-model",
         help="Gemini model to use for the Defender.",
     ),
@@ -316,7 +310,7 @@ def adversarial_loop(
         help="Gemini model to use for the Attacker.",
     ),
     utility_model: str = typer.Option(
-        "gemini-2.5-flash",
+        UtilityJudge.DEFAULT_MODEL,
         "--utility-model",
         help="Gemini model to use for the Utility Judge.",
     ),
