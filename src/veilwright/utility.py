@@ -18,7 +18,7 @@ class UtilityJudge:
     """Scores meaning preservation between original and rewritten text."""
 
     DEFAULT_MODEL = "gemini-2.5-flash"
-    MAX_TOKENS = 4096
+    MAX_TOKENS = 16384
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self.model = model or self.DEFAULT_MODEL

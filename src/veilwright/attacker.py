@@ -123,7 +123,7 @@ class Attacker:
     """Attacker wrapper around Gemini calls."""
 
     DEFAULT_MODEL = "gemini-2.5-flash"
-    MAX_TOKENS = 4096
+    MAX_TOKENS = 16384
 
     def __init__(
         self,
