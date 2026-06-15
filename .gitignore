@@ -37,13 +37,8 @@ htmlcov/
 .coverage
 coverage.xml
 
-# uv
-uv.lock
-
-# Tests (not tracking yet)
-tests/
-
 # Misc
+*.zip
 *.db
 *.sqlite3
 CLAUDE.md

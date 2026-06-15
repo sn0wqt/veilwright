@@ -1,0 +1,1654 @@
+import json
+import unittest
+from unittest.mock import MagicMock, patch
+
+from veilwright import run_anonymizer
+from veilwright.utils import (
+    _compare_guess_to_ground_truth,
+    _date_tuple,
+    _parse_date_value,
+    is_guess_correct,
+    parse_llm_json,
+    parse_validated_llm_json,
+    validate_defender_response,
+    validate_utility_response,
+)
+from veilwright.types import (
+    AdversarialIteration,
+    AdversarialResult,
+    AttackerOutput,
+    DefenderInput,
+    DefenderOutput,
+    StrategyRecord,
+    UtilityInput,
+    UtilityOutput,
+)
+from veilwright.attacker import (
+    Attacker,
+    AttackerError,
+    _build_repair_prompt,
+    _build_system_prompt,
+)
+from veilwright.defender import Defender, DefenderError, _normalize_clue_map, _stringify_ground_truth_value
+from veilwright.llm_client import GeminiClient
+from veilwright.orchestrator import (
+    run_adversarial_loop,
+    _build_attacker_feedback,
+    _build_iteration_feedback,
+    _verified_successful_attributes,
+)
+from veilwright.prompts import (
+    build_clue_enumeration_prompt,
+    build_ground_truth_prompt,
+    build_rewrite_prompt,
+    build_utility_prompt,
+)
+from veilwright.scanner import (
+    PIIMatch,
+    _deduplicate_spans,
+    _is_false_positive_person,
+    _is_valid_phone,
+    _luhn_check,
+    scan_text,
+)
+from veilwright.strategies import RewriteStrategy, VALID_STRATEGY_NAMES
+from veilwright.utility import UtilityError, UtilityJudge
+
+
+class TestUtils(unittest.TestCase):
+    def test_compare_guess_to_ground_truth(self) -> None:
+        self.assertTrue(_compare_guess_to_ground_truth("46", "46"))
+        self.assertTrue(_compare_guess_to_ground_truth("46 years old", "46"))
+        self.assertTrue(_compare_guess_to_ground_truth("46", "46 years old"))
+        self.assertTrue(_compare_guess_to_ground_truth("Cardiologist", "cardiologist"))
+        self.assertTrue(_compare_guess_to_ground_truth("mid-40s", "46", "Age"))
+        self.assertTrue(
+            _compare_guess_to_ground_truth("born around 1960", "1963", "Birth Year")
+        )
+
+        self.assertFalse(_compare_guess_to_ground_truth("UNKNOWN", "46"))
+        self.assertFalse(_compare_guess_to_ground_truth("46", "UNKNOWN"))
+        self.assertFalse(_compare_guess_to_ground_truth("", "46"))
+        self.assertFalse(_compare_guess_to_ground_truth("46", ""))
+        self.assertFalse(_compare_guess_to_ground_truth("mid-40s", "46", "Profession"))
+        self.assertFalse(_compare_guess_to_ground_truth("1960", "1963", "Location"))
+        self.assertFalse(_compare_guess_to_ground_truth("District 4", "District 9", "Location"))
+        self.assertFalse(_compare_guess_to_ground_truth("London", "Paris"))
+        self.assertFalse(_compare_guess_to_ground_truth("1990", "2000"))
+
+        # Name / Identity matching tests
+        self.assertTrue(_compare_guess_to_ground_truth("Barack Obama", "Barack Hussein Obama", "Identity"))
+        self.assertTrue(_compare_guess_to_ground_truth("Neil Armstrong", "Neil A. Armstrong", "Referenced Person"))
+        self.assertTrue(_compare_guess_to_ground_truth("Obama", "Barack Obama", "Identity"))
+        self.assertFalse(_compare_guess_to_ground_truth("Obama", "John McCain", "Identity"))
+
+        # Date matching tests
+        self.assertTrue(_compare_guess_to_ground_truth("August 4, 1961", "4 August 1961", "Birth Date"))
+        self.assertTrue(_compare_guess_to_ground_truth("August 4, 1961", "04.08.1961", "Birth Date"))
+        self.assertTrue(_compare_guess_to_ground_truth("4 Aug 1961", "04.08.1961", "Birth Date"))
+        self.assertTrue(_compare_guess_to_ground_truth("January 15, 2024", "01/15/2024", "Event Date"))
+        self.assertFalse(_compare_guess_to_ground_truth("August 4, 1961", "August 4, 1980", "Birth Date"))
+        self.assertFalse(_compare_guess_to_ground_truth("August 4, 1980", "04.08.1961", "Birth Date"))
+        self.assertFalse(_compare_guess_to_ground_truth("August 4, 1961", "August 1961", "Birth Date"))
+
+    def test_compare_guess_year_boundary(self) -> None:
+        """Birth year tolerance is 5 — exactly 5 apart should match, 6 should not."""
+        self.assertTrue(_compare_guess_to_ground_truth("1958", "1963", "Birth Year"))
+        self.assertFalse(_compare_guess_to_ground_truth("1956", "1963", "Birth Year"))
+
+    def test_compare_guess_age_boundary(self) -> None:
+        """Age tolerance is 6 — exactly 6 apart should match, 7 should not."""
+        self.assertTrue(_compare_guess_to_ground_truth("40", "46", "Age"))
+        self.assertFalse(_compare_guess_to_ground_truth("39", "46", "Age"))
+
+    def test_is_guess_correct_none_truth(self) -> None:
+        self.assertFalse(is_guess_correct("46", None, 0.9, "Age"))
+
+    def test_validate_utility_response(self) -> None:
+        self.assertEqual(validate_utility_response({"score": 0.8, "rationale": "Good"}), [])
+        self.assertIn(
+            "score",
+            "".join(validate_utility_response({"score": -0.1, "rationale": "Good"})),
+        )
+        self.assertIn(
+            "score",
+            "".join(validate_utility_response({"score": "0.8", "rationale": "Good"})),
+        )
+        self.assertIn("rationale", "".join(validate_utility_response({"score": 0.8})))
+        self.assertIn(
+            "rationale",
+            "".join(validate_utility_response({"score": 0.8, "rationale": "   "})),
+        )
+
+    def test_validate_utility_response_score_above_1(self) -> None:
+        errors = validate_utility_response({"score": 1.1, "rationale": "Good"})
+        self.assertTrue(any("score" in e for e in errors))
+
+    def test_validate_defender_response_rejects_empty_rewrite(self) -> None:
+        errors = validate_defender_response(
+            {
+                "rewritten_text": "   ",
+                "strategies_used": [
+                    {
+                        "attribute": "Age",
+                        "strategy": "abstraction",
+                        "reasoning": "Removed age clues.",
+                    }
+                ],
+                "confidence": 0.8,
+            },
+            ["Age"],
+        )
+
+        self.assertIn("non-empty", " ".join(errors))
+
+    def test_validate_defender_response_valid(self) -> None:
+        errors = validate_defender_response(
+            {
+                "rewritten_text": "Some text",
+                "strategies_used": [
+                    {
+                        "attribute": "Age",
+                        "strategy": "abstraction",
+                        "reasoning": "Removed age.",
+                    }
+                ],
+                "confidence": 0.8,
+            },
+            ["Age"],
+        )
+        self.assertEqual(errors, [])
+
+    def test_validate_defender_response_invalid_strategy_name(self) -> None:
+        errors = validate_defender_response(
+            {
+                "rewritten_text": "Text",
+                "strategies_used": [
+                    {
+                        "attribute": "Age",
+                        "strategy": "deletion",
+                        "reasoning": "Bad strategy.",
+                    }
+                ],
+                "confidence": 0.8,
+            },
+            ["Age"],
+        )
+        self.assertTrue(any("invalid strategy" in e for e in errors))
+
+    def test_validate_defender_response_missing_target_coverage(self) -> None:
+        errors = validate_defender_response(
+            {
+                "rewritten_text": "Text",
+                "strategies_used": [
+                    {
+                        "attribute": "Age",
+                        "strategy": "abstraction",
+                        "reasoning": "OK.",
+                    }
+                ],
+                "confidence": 0.8,
+            },
+            ["Age", "Location"],
+        )
+        self.assertTrue(any("Location" in e for e in errors))
+
+    def test_validate_defender_response_normalizes_strategy_case(self) -> None:
+        data: dict[str, object] = {
+            "rewritten_text": "Text",
+            "strategies_used": [
+                {
+                    "attribute": "Age",
+                    "strategy": "ABSTRACTION",
+                    "reasoning": "OK.",
+                }
+            ],
+            "confidence": 0.8,
+        }
+        errors = validate_defender_response(data, ["Age"])
+        self.assertEqual(errors, [])
+        strategies = data["strategies_used"]
+        assert isinstance(strategies, list)
+        self.assertEqual(strategies[0]["strategy"], "abstraction")
+
+    def test_parse_llm_json_ignores_malformed_brace_fallback(self) -> None:
+        with self.assertRaisesRegex(ValueError, "No JSON object found"):
+            parse_llm_json("prefix {not valid json} suffix")
+
+    def test_parse_llm_json_plain(self) -> None:
+        result = parse_llm_json('{"key": "value"}')
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_llm_json_markdown_fences(self) -> None:
+        result = parse_llm_json('```json\n{"key": "value"}\n```')
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_llm_json_string_wrapped_object(self) -> None:
+        result = parse_llm_json('"{\\"key\\": \\"value\\"}"')
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_llm_json_surrounding_text(self) -> None:
+        result = parse_llm_json('Here is the result: {"key": "value"} hope that helps!')
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_llm_json_empty_string(self) -> None:
+        with self.assertRaises(json.JSONDecodeError):
+            parse_llm_json("")
+
+    def test_parse_validated_llm_json_success_first_try(self) -> None:
+        result = parse_validated_llm_json(
+            initial_text='{"score": 0.8, "rationale": "Good"}',
+            retry=lambda: "",
+            validate=validate_utility_response,
+            error_type=ValueError,
+            parse_error_message="Parse failed: {error}",
+            validation_error_message="Validation failed: {errors}",
+        )
+        self.assertEqual(result["score"], 0.8)
+
+    def test_parse_validated_llm_json_retries_on_parse_failure(self) -> None:
+        result = parse_validated_llm_json(
+            initial_text="not json",
+            retry=lambda: '{"score": 0.8, "rationale": "Good"}',
+            validate=validate_utility_response,
+            error_type=ValueError,
+            parse_error_message="Parse failed: {error}",
+            validation_error_message="Validation failed: {errors}",
+        )
+        self.assertEqual(result["score"], 0.8)
+
+    def test_parse_validated_llm_json_retries_on_validation_failure(self) -> None:
+        result = parse_validated_llm_json(
+            initial_text='{"score": 1.5, "rationale": "Bad"}',
+            retry=lambda: '{"score": 0.8, "rationale": "Good"}',
+            validate=validate_utility_response,
+            error_type=ValueError,
+            parse_error_message="Parse failed: {error}",
+            validation_error_message="Validation failed: {errors}",
+        )
+        self.assertEqual(result["score"], 0.8)
+
+    def test_parse_validated_llm_json_raises_after_double_failure(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_validated_llm_json(
+                initial_text="not json",
+                retry=lambda: "still not json",
+                validate=validate_utility_response,
+                error_type=ValueError,
+                parse_error_message="Parse failed: {error}",
+                validation_error_message="Validation failed: {errors}",
+            )
+
+    def test_is_guess_correct_consolidated(self) -> None:
+        self.assertTrue(is_guess_correct("mid-40s", "46", 0.7, "Age"))
+        self.assertFalse(is_guess_correct("mid-40s", "46", 0.69, "Age"))
+        self.assertFalse(is_guess_correct("UNKNOWN", "46", 0.9, "Age"))
+        self.assertFalse(is_guess_correct("District 4", "District 9", 0.9, "Location"))
+
+    def test_is_guess_correct_custom_threshold(self) -> None:
+        self.assertTrue(is_guess_correct("46", "46", 0.8, "Age", threshold=0.8))
+        self.assertFalse(is_guess_correct("46", "46", 0.79, "Age", threshold=0.8))
+
+
+class TestScanner(unittest.TestCase):
+    def test_scan_text_masks_regex_pii(self) -> None:
+        result = scan_text("Email sarah@example.com and card 4111 1111 1111 1111.")
+
+        self.assertIn("<EMAIL>", result.masked_text)
+        self.assertIn("<CREDIT_CARD>", result.masked_text)
+        self.assertNotIn("sarah@example.com", result.masked_text)
+
+    def test_scan_text_empty_input(self) -> None:
+        result = scan_text("")
+        self.assertEqual(result.masked_text, "")
+        self.assertEqual(result.pii_found, [])
+
+    def test_scan_text_no_pii(self) -> None:
+        text = "The sky is blue and the grass is green."
+        result = scan_text(text)
+        self.assertEqual(result.masked_text, text)
+
+    def test_scan_text_date_detected_but_not_masked(self) -> None:
+        result = scan_text("Event on 2024-01-15 was great.")
+        date_matches = [m for m in result.pii_found if m.pii_type == "DATE"]
+        self.assertTrue(len(date_matches) > 0)
+        # Dates should NOT be masked
+        self.assertIn("2024-01-15", result.masked_text)
+
+    def test_scan_text_does_not_mask_the_moon_as_person(self) -> None:
+        result = scan_text("The astronaut walked on the Moon.")
+        self.assertIn("the Moon", result.masked_text)
+        self.assertNotIn("<PERSON>", result.masked_text)
+
+    def test_false_positive_person_filter_keeps_real_names(self) -> None:
+        text = "Neil Armstrong walked on the Moon."
+        self.assertFalse(_is_false_positive_person("Neil Armstrong", text, 0))
+        self.assertTrue(_is_false_positive_person("Moon", text, text.index("Moon")))
+
+    def test_luhn_check_valid(self) -> None:
+        self.assertTrue(_luhn_check("4111111111111111"))
+
+    def test_luhn_check_invalid(self) -> None:
+        self.assertFalse(_luhn_check("4111111111111112"))
+
+    def test_luhn_check_non_numeric(self) -> None:
+        self.assertFalse(_luhn_check("abc"))
+
+    def test_deduplicate_spans_prioritizes_maskable_overlaps(self) -> None:
+        non_maskable = PIIMatch(
+            pii_type="ORGANIZATION",
+            value="Contact sarah@example.com",
+            start=0,
+            end=25,
+            replacement="<ORGANIZATION>",
+            mask=False,
+        )
+        maskable = PIIMatch(
+            pii_type="EMAIL",
+            value="sarah@example.com",
+            start=8,
+            end=25,
+            replacement="<EMAIL>",
+            mask=True,
+        )
+
+        result = _deduplicate_spans([non_maskable, maskable])
+
+        self.assertEqual(result, [maskable])
+
+    def test_deduplicate_spans_empty(self) -> None:
+        self.assertEqual(_deduplicate_spans([]), [])
+
+    def test_is_valid_phone_local_number_fallback(self) -> None:
+        self.assertTrue(_is_valid_phone("(202) 555-1234"))
+
+
+class TestTypes(unittest.TestCase):
+    def test_utility_input_from_dict_defaults(self) -> None:
+        result = UtilityInput.from_dict({})
+
+        self.assertEqual(result.original_text, "")
+        self.assertEqual(result.rewritten_text, "")
+        self.assertIsNone(result.target_attributes)
+
+    def test_utility_input_from_dict_target_attributes(self) -> None:
+        result = UtilityInput.from_dict(
+            {
+                "original_text": "Original",
+                "rewritten_text": "Rewritten",
+                "target_attributes": ["Age", 46],
+            }
+        )
+
+        self.assertEqual(result.to_dict()["target_attributes"], ["Age", "46"])
+
+    def test_defender_input_roundtrip(self) -> None:
+        original = DefenderInput(
+            text="Some text",
+            target_attributes=["Age", "Location"],
+            iteration=2,
+            attacker_feedback="feedback",
+            ground_truth={"Age": "46"},
+        )
+        restored = DefenderInput.from_dict(original.to_dict())
+        self.assertEqual(restored.text, original.text)
+        self.assertEqual(restored.target_attributes, original.target_attributes)
+        self.assertEqual(restored.iteration, original.iteration)
+        self.assertEqual(restored.attacker_feedback, original.attacker_feedback)
+        self.assertEqual(restored.ground_truth, original.ground_truth)
+
+    def test_defender_input_from_dict_defaults(self) -> None:
+        result = DefenderInput.from_dict({})
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.target_attributes, [])
+        self.assertEqual(result.iteration, 1)
+        self.assertIsNone(result.attacker_feedback)
+        self.assertEqual(result.ground_truth, {})
+
+    def test_attacker_output_roundtrip(self) -> None:
+        original = AttackerOutput(
+            guesses={"Age": "46"},
+            reasoning={"Age": "clue"},
+            confidence={"Age": 0.8},
+            successful_attributes=["Age"],
+            raw_response="raw",
+        )
+        restored = AttackerOutput.from_dict(original.to_dict())
+        self.assertEqual(restored.guesses, original.guesses)
+        self.assertEqual(restored.reasoning, original.reasoning)
+        self.assertEqual(restored.confidence, original.confidence)
+        self.assertEqual(restored.successful_attributes, original.successful_attributes)
+
+    def test_strategy_record_roundtrip(self) -> None:
+        original = StrategyRecord("Age", "abstraction", "Reason")
+        restored = StrategyRecord.from_dict(original.to_dict())
+        self.assertEqual(restored.attribute, original.attribute)
+        self.assertEqual(restored.strategy, original.strategy)
+        self.assertEqual(restored.reasoning, original.reasoning)
+
+    def test_strategy_record_from_dict_defaults(self) -> None:
+        result = StrategyRecord.from_dict({})
+        self.assertEqual(result.attribute, "")
+        self.assertEqual(result.strategy, "omission")
+        self.assertEqual(result.reasoning, "")
+
+    def test_adversarial_result_roundtrip(self) -> None:
+        iteration = AdversarialIteration(
+            iteration=1,
+            defender_output=DefenderOutput(
+                original_text="orig", rewritten_text="rewritten",
+                target_attributes=["Age"],
+                strategies_used=[StrategyRecord("Age", "abstraction", "R")],
+                confidence=0.9, iteration=1,
+            ),
+            attacker_output=AttackerOutput(
+                guesses={"Age": "46"}, reasoning={"Age": "clue"},
+                confidence={"Age": 0.8}, successful_attributes=["Age"],
+            ),
+            utility_output=UtilityOutput(
+                original_text="orig", rewritten_text="rewritten",
+                score=0.8, rationale="Good", passes=True,
+            ),
+            attacker_success=True,
+            utility_pass=True,
+        )
+        result = AdversarialResult(
+            final_rewritten_text="rewritten",
+            iterations=[iteration],
+            total_iterations=1,
+            exit_reason="attacker_failed",
+            ground_truth={"Age": "46"},
+            final_utility_score=0.8,
+            success=True,
+        )
+        restored = AdversarialResult.from_dict(result.to_dict())
+        self.assertEqual(restored.final_rewritten_text, result.final_rewritten_text)
+        self.assertEqual(restored.total_iterations, 1)
+        self.assertEqual(restored.exit_reason, "attacker_failed")
+        self.assertTrue(restored.success)
+        self.assertEqual(len(restored.iterations), 1)
+
+
+class TestPublicApi(unittest.TestCase):
+    @patch("veilwright.defender.Defender")
+    def test_run_anonymizer_delegates_to_defender(self, mock_defender_cls: MagicMock) -> None:
+        defender_input = DefenderInput(text="Text", target_attributes=["Age"])
+        defender_output = DefenderOutput(
+            original_text="Text",
+            rewritten_text="Rewritten",
+            target_attributes=["Age"],
+            strategies_used=[],
+            confidence=0.9,
+            iteration=1,
+        )
+        mock_defender = mock_defender_cls.return_value
+        mock_defender.run.return_value = defender_output
+
+        result = run_anonymizer(defender_input, api_key="api-key", model="gemini-test")
+
+        self.assertIs(result, defender_output)
+        mock_defender_cls.assert_called_once_with(api_key="api-key", model="gemini-test")
+        mock_defender.run.assert_called_once_with(defender_input)
+
+class TestDefender(unittest.TestCase):
+    def test_extract_ground_truth_includes_income(self) -> None:
+        defender = Defender(api_key="fake_key")
+        defender._call_llm = MagicMock(
+            return_value='{"ground_truth": {"income": "$300,000 annually"}}'
+        )
+
+        result = defender.extract_ground_truth(
+            "Sarah earns $300,000 annually.",
+            ["Income"],
+        )
+
+        self.assertEqual(result["Income"], "$300,000 annually")
+        prompt = defender._call_llm.call_args.args[0][0]
+        self.assertIn("Include financial attributes such as income", prompt)
+        self.assertIn("earns $300,000 annually", prompt)
+
+    def test_extract_ground_truth_stringifies_list_values_readably(self) -> None:
+        defender = Defender(api_key="fake_key")
+        defender._call_llm = MagicMock(
+            return_value=(
+                '{"ground_truth": {"Political Office": '
+                '["president", "senator"]}}'
+            )
+        )
+
+        result = defender.extract_ground_truth(
+            "A person served as president and senator.",
+            ["Political Office"],
+        )
+
+        self.assertEqual(result["Political Office"], "president; senator")
+
+    def test_run_does_not_mutate_input_ground_truth(self) -> None:
+        defender = Defender(api_key="fake_key")
+        defender.extract_ground_truth = MagicMock(return_value={"Age": "46"})
+        defender._enumerate_clues = MagicMock(return_value={})
+        defender._call_llm = MagicMock(
+            return_value="""
+            {
+              "rewritten_text": "A person is an experienced adult.",
+              "strategies_used": [
+                {
+                  "attribute": "Age",
+                  "strategy": "abstraction",
+                  "reasoning": "Removed the exact age."
+                }
+              ],
+              "confidence": 0.9
+            }
+            """
+        )
+        defender_input = DefenderInput(
+            text="Sarah is 46 years old.",
+            target_attributes=["Age"],
+        )
+
+        result = defender.run(defender_input)
+
+        self.assertEqual(defender_input.ground_truth, {})
+        self.assertEqual(result.ground_truth, {"Age": "46"})
+
+    def test_defender_retries_invalid_json(self) -> None:
+        defender = Defender(api_key="fake_key")
+        valid_response = """
+        {
+          "rewritten_text": "I remember a major public event with my father.",
+          "strategies_used": [
+            {
+              "attribute": "Age",
+              "strategy": "abstraction",
+              "reasoning": "Removed the precise age clue."
+            }
+          ],
+          "confidence": 0.9
+        }
+        """
+
+        defender._call_llm = MagicMock(side_effect=["not json", valid_response])
+        result = defender.run(
+            DefenderInput(
+                text="I was six years old.",
+                target_attributes=["Age"],
+                iteration=2,
+                ground_truth={"Age": "6"},
+            )
+        )
+
+        self.assertEqual(result.rewritten_text, "I remember a major public event with my father.")
+        self.assertEqual(defender._call_llm.call_count, 2)
+
+
+class TestAttacker(unittest.TestCase):
+    @patch("veilwright.llm_client.genai.Client")
+    def test_attacker_run_success(self, mock_client_cls: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = """
+        {
+          "guesses": {
+            "Age": "46",
+            "Profession": "Cardiologist"
+          },
+          "reasoning": {
+            "Age": "Mentions medical school timeline",
+            "Profession": "Mentions hospital cardiology department"
+          },
+          "confidence": {
+            "Age": 0.8,
+            "Profession": 0.9
+          },
+          "successful_attributes": ["Age", "Profession"]
+        }
+        """
+        mock_client.models.generate_content.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        attacker = Attacker(api_key="fake_key")
+
+        output = attacker.run("Rewritten text", ["Age", "Profession"])
+
+        self.assertEqual(output.guesses["Age"], "46")
+        self.assertEqual(output.guesses["Profession"], "Cardiologist")
+        self.assertEqual(output.confidence["Age"], 0.8)
+        self.assertIn("Age", output.successful_attributes)
+        self.assertIn("Profession", output.successful_attributes)
+
+    def test_attacker_rejects_empty_input(self) -> None:
+        attacker = Attacker(api_key="fake_key")
+
+        with self.assertRaisesRegex(AttackerError, "rewritten_text"):
+            attacker.run("   ", ["Age"])
+
+        with self.assertRaisesRegex(AttackerError, "target_attributes"):
+            attacker.run("Rewritten text", [])
+
+    def test_attacker_validation_rejects_bad_confidence_and_unknown_success(self) -> None:
+        attacker = Attacker(api_key="fake_key")
+
+        errors = attacker._validate_response(
+            {
+                "guesses": {"Age": "46"},
+                "reasoning": {"Age": "Timeline clue"},
+                "confidence": {"Age": 1.2},
+                "successful_attributes": ["Location"],
+            },
+            ["Age"],
+        )
+
+        joined = " ".join(errors)
+        self.assertIn("confidence.Age", joined)
+        self.assertIn("unknown attribute", joined)
+
+    def test_attacker_uses_final_repair_after_retry_parse_failure(self) -> None:
+        attacker = Attacker(api_key="fake_key")
+        attacker._call_llm = MagicMock(
+            side_effect=[
+                "not json",
+                "still not json",
+                """
+                {
+                  "guesses": {"Age": "UNKNOWN"},
+                  "reasoning": {"Age": "No age clues remain."},
+                  "confidence": {"Age": 0.0},
+                  "successful_attributes": []
+                }
+                """,
+            ]
+        )
+
+        output = attacker.run("A person remembers a vague event.", ["Age"])
+
+        self.assertEqual(output.guesses["Age"], "UNKNOWN")
+        self.assertEqual(output.confidence["Age"], 0.0)
+        self.assertEqual(output.successful_attributes, [])
+        self.assertEqual(attacker._call_llm.call_count, 3)
+        self.assertEqual(attacker._call_llm.call_args.kwargs["temperature"], 0.0)
+
+
+class TestUtilityJudge(unittest.TestCase):
+    def test_score_rejects_empty_texts(self) -> None:
+        judge = UtilityJudge(api_key="fake_key")
+
+        with self.assertRaisesRegex(UtilityError, "original_text"):
+            judge.score(UtilityInput(original_text=" ", rewritten_text="Rewritten"))
+
+        with self.assertRaisesRegex(UtilityError, "rewritten_text"):
+            judge.score(UtilityInput(original_text="Original", rewritten_text=" "))
+
+
+class TestGeminiClient(unittest.TestCase):
+    @patch.dict(
+        "os.environ",
+        {
+            "GEMINI_API_KEY": "studio-key",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/service-account.json",
+            "GOOGLE_CLOUD_PROJECT": "demo-project",
+        },
+    )
+    @patch("veilwright.llm_client.os.path.exists", return_value=True)
+    @patch("veilwright.llm_client.genai.Client")
+    def test_fallback_switches_to_vertex_after_rate_limit(
+        self,
+        mock_client_cls: MagicMock,
+        mock_exists: MagicMock,
+    ) -> None:
+        class DummyError(Exception):
+            """Test-specific Gemini wrapper error."""
+
+        primary = MagicMock()
+        fallback = MagicMock()
+        primary.models.generate_content.side_effect = RuntimeError(
+            "429 RESOURCE_EXHAUSTED"
+        )
+        fallback_response = MagicMock()
+        fallback_response.text = "ok"
+        fallback.models.generate_content.return_value = fallback_response
+        mock_client_cls.side_effect = [primary, fallback]
+
+        client = GeminiClient(
+            model="gemini-test",
+            label="test",
+            error_type=DummyError,
+        )
+
+        self.assertEqual(
+            client.generate(["prompt"], "system", 128, 0.0),
+            "ok",
+        )
+        self.assertIs(client._client, fallback)
+        self.assertIsNone(client._fallback_client)
+
+        self.assertEqual(
+            client.generate(["prompt"], "system", 128, 0.0),
+            "ok",
+        )
+        self.assertEqual(primary.models.generate_content.call_count, 1)
+        self.assertEqual(fallback.models.generate_content.call_count, 2)
+        mock_exists.assert_called()
+
+    @patch.dict("os.environ", {"GEMINI_API_KEY": "studio-key"}, clear=True)
+    @patch("veilwright.llm_client.genai.Client")
+    def test_retries_empty_response(self, mock_client_cls: MagicMock) -> None:
+        class DummyError(Exception):
+            """Test-specific Gemini wrapper error."""
+
+        client_obj = MagicMock()
+        empty_response = MagicMock()
+        empty_response.text = ""
+        ok_response = MagicMock()
+        ok_response.text = '{"ok": true}'
+        client_obj.models.generate_content.side_effect = [
+            empty_response,
+            empty_response,
+            empty_response,
+            ok_response,
+        ]
+        mock_client_cls.return_value = client_obj
+
+        client = GeminiClient(
+            model="gemini-test",
+            label="test",
+            error_type=DummyError,
+        )
+
+        self.assertEqual(
+            client.generate(
+                ["prompt"],
+                "system",
+                128,
+                0.0,
+                response_mime_type="application/json",
+            ),
+            '{"ok": true}',
+        )
+        self.assertEqual(client_obj.models.generate_content.call_count, 4)
+        config = client_obj.models.generate_content.call_args.kwargs["config"]
+        self.assertEqual(config["response_mime_type"], "application/json")
+
+
+class TestOrchestrator(unittest.TestCase):
+    def test_run_adversarial_loop_validates_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "text must be non-empty"):
+            run_adversarial_loop("", ["Age"])
+
+        with self.assertRaisesRegex(ValueError, "target_attributes"):
+            run_adversarial_loop("Text", [])
+
+        with self.assertRaisesRegex(ValueError, "utility_threshold"):
+            run_adversarial_loop("Text", ["Age"], utility_threshold=1.5)
+
+    def test_build_attacker_feedback(self) -> None:
+        attacker_output = AttackerOutput(
+            guesses={"Age": "46", "Location": "UNKNOWN"},
+            reasoning={"Age": "CoT", "Location": "None"},
+            confidence={"Age": 0.8, "Location": 0.1},
+            successful_attributes=["Age"]
+        )
+        feedback = _build_attacker_feedback(attacker_output)
+        self.assertIn("Guessed '46'", feedback)
+        self.assertNotIn("Location", feedback)
+
+    def test_build_attacker_feedback_only_verified_successes(self) -> None:
+        attacker_output = AttackerOutput(
+            guesses={"Age": "46", "Profession": "Doctor"},
+            reasoning={"Age": "Age clue", "Profession": "Profession clue"},
+            confidence={"Age": 0.8, "Profession": 0.9},
+            successful_attributes=["Age"],
+        )
+
+        feedback = _build_attacker_feedback(attacker_output)
+
+        self.assertIn("Age clue", feedback)
+        self.assertNotIn("Profession clue", feedback)
+
+    def test_iteration_feedback_attacker_success_utility_pass(self) -> None:
+        attacker_output = AttackerOutput(
+            guesses={"Age": "46"},
+            reasoning={"Age": "Timeline clue"},
+            confidence={"Age": 0.8},
+            successful_attributes=["Age"],
+        )
+
+        feedback = _build_iteration_feedback(attacker_output, 0.9, 0.75, True)
+
+        self.assertIn("Timeline clue", feedback)
+        self.assertNotIn("utility", feedback.lower())
+
+    def test_iteration_feedback_privacy_success_utility_low(self) -> None:
+        attacker_output = AttackerOutput(
+            guesses={"Age": "UNKNOWN"},
+            reasoning={"Age": "No clues"},
+            confidence={"Age": 0.1},
+            successful_attributes=[],
+        )
+
+        feedback = _build_iteration_feedback(attacker_output, 0.4, 0.75, False)
+
+        self.assertIn("Privacy goal achieved", feedback)
+        self.assertIn("focus on PRESERVING", feedback)
+        self.assertIn("Do NOT apply heavier anonymization", feedback)
+
+    def test_iteration_feedback_attacker_success_utility_low(self) -> None:
+        attacker_output = AttackerOutput(
+            guesses={"Age": "46"},
+            reasoning={"Age": "Timeline clue"},
+            confidence={"Age": 0.8},
+            successful_attributes=["Age"],
+        )
+
+        feedback = _build_iteration_feedback(attacker_output, 0.4, 0.75, False)
+
+        self.assertIn("The attacker successfully guessed: Age", feedback)
+        self.assertIn("Timeline clue", feedback)
+        self.assertIn("preserve more non-sensitive narrative detail", feedback)
+
+    def test_rewrite_prompt_uses_lighter_touch_for_utility_recovery(self) -> None:
+        prompt = build_rewrite_prompt(
+            text="Original text",
+            target_attributes=["Age"],
+            iteration=2,
+            attacker_feedback=(
+                "Privacy goal achieved. On the next iteration, focus on PRESERVING "
+                "the narrative structure."
+            ),
+        )
+
+        self.assertIn("achieved privacy but lost too much meaning", prompt)
+        self.assertIn("Apply lighter-touch strategies", prompt)
+        self.assertNotIn("MUST apply a heavier rewrite", prompt)
+
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
+    def test_run_adversarial_loop_success(
+        self,
+        mock_judge_cls: MagicMock,
+        mock_attacker_cls: MagicMock,
+        mock_defender_cls: MagicMock,
+    ) -> None:
+        # Configure Mocks
+        mock_defender = MagicMock()
+        mock_attacker = MagicMock()
+        mock_judge = MagicMock()
+        
+        mock_defender_cls.return_value = mock_defender
+        mock_attacker_cls.return_value = mock_attacker
+        mock_judge_cls.return_value = mock_judge
+        
+        # Iteration 1 Defender output
+        mock_defender.run.return_value = DefenderOutput(
+            original_text="Original text",
+            rewritten_text="Anonymized text",
+            target_attributes=["Age"],
+            strategies_used=[StrategyRecord("Age", "abstraction", "Reason")],
+            confidence=0.9,
+            iteration=1,
+            ground_truth={"Age": "46"}
+        )
+        
+        # Iteration 1 Attacker output (fails to guess, low confidence)
+        mock_attacker.run.return_value = AttackerOutput(
+            guesses={"Age": "UNKNOWN"},
+            reasoning={"Age": "None"},
+            confidence={"Age": 0.2},
+            successful_attributes=[]
+        )
+        
+        # Iteration 1 Judge output (passing score)
+        mock_judge.score.return_value = UtilityOutput(
+            original_text="Original text",
+            rewritten_text="Anonymized text",
+            score=0.8,
+            rationale="Great utility",
+            passes=True
+        )
+        
+        result = run_adversarial_loop(
+            text="Original text",
+            target_attributes=["Age"],
+            max_iterations=2
+        )
+        
+        self.assertTrue(result.success)
+        self.assertEqual(result.exit_reason, "attacker_failed")
+        self.assertEqual(result.total_iterations, 1)
+        self.assertEqual(result.final_utility_score, 0.8)
+        self.assertEqual(result.ground_truth["Age"], "46")
+
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
+    def test_run_adversarial_loop_max_iterations_reached(
+        self,
+        mock_judge_cls: MagicMock,
+        mock_attacker_cls: MagicMock,
+        mock_defender_cls: MagicMock,
+    ) -> None:
+        mock_defender = MagicMock()
+        mock_attacker = MagicMock()
+        mock_judge = MagicMock()
+        mock_defender_cls.return_value = mock_defender
+        mock_attacker_cls.return_value = mock_attacker
+        mock_judge_cls.return_value = mock_judge
+
+        mock_defender.run.side_effect = [
+            DefenderOutput(
+                original_text="Original text",
+                rewritten_text="Anonymized text 1",
+                target_attributes=["Age"],
+                strategies_used=[StrategyRecord("Age", "abstraction", "Reason")],
+                confidence=0.9,
+                iteration=1,
+                ground_truth={"Age": "46"},
+            ),
+            DefenderOutput(
+                original_text="Original text",
+                rewritten_text="Anonymized text 2",
+                target_attributes=["Age"],
+                strategies_used=[StrategyRecord("Age", "omission", "Reason")],
+                confidence=0.9,
+                iteration=2,
+                ground_truth={"Age": "46"},
+            ),
+        ]
+        mock_attacker.run.return_value = AttackerOutput(
+            guesses={"Age": "mid-40s"},
+            reasoning={"Age": "Remaining timeline clue"},
+            confidence={"Age": 0.8},
+            successful_attributes=["Age"],
+        )
+        mock_judge.score.return_value = UtilityOutput(
+            original_text="Original text",
+            rewritten_text="Anonymized text",
+            score=0.8,
+            rationale="Good utility",
+        )
+
+        result = run_adversarial_loop(
+            text="Original text",
+            target_attributes=["Age"],
+            max_iterations=2,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.exit_reason, "max_iterations_reached")
+        self.assertEqual(result.total_iterations, 2)
+        self.assertEqual(result.iterations[-1].attacker_output.successful_attributes, ["Age"])
+
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
+    def test_run_adversarial_loop_uses_custom_confidence_threshold(
+        self,
+        mock_judge_cls: MagicMock,
+        mock_attacker_cls: MagicMock,
+        mock_defender_cls: MagicMock,
+    ) -> None:
+        mock_defender = MagicMock()
+        mock_attacker = MagicMock()
+        mock_judge = MagicMock()
+        mock_defender_cls.return_value = mock_defender
+        mock_attacker_cls.return_value = mock_attacker
+        mock_judge_cls.return_value = mock_judge
+
+        mock_defender.run.return_value = DefenderOutput(
+            original_text="Original text",
+            rewritten_text="Anonymized text",
+            target_attributes=["Age"],
+            strategies_used=[StrategyRecord("Age", "abstraction", "Reason")],
+            confidence=0.9,
+            iteration=1,
+            ground_truth={"Age": "46"},
+        )
+        mock_attacker.run.return_value = AttackerOutput(
+            guesses={"Age": "46"},
+            reasoning={"Age": "Direct age clue"},
+            confidence={"Age": 0.75},
+            successful_attributes=["Age"],
+        )
+        mock_judge.score.return_value = UtilityOutput(
+            original_text="Original text",
+            rewritten_text="Anonymized text",
+            score=0.8,
+            rationale="Good utility",
+        )
+
+        result = run_adversarial_loop(
+            text="Original text",
+            target_attributes=["Age"],
+            max_iterations=1,
+            confidence_threshold=0.8,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.confidence_threshold, 0.8)
+        self.assertEqual(result.iterations[0].attacker_output.successful_attributes, [])
+        mock_attacker_cls.assert_called_once()
+        self.assertEqual(mock_attacker_cls.call_args.kwargs["confidence_threshold"], 0.8)
+
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
+    def test_run_adversarial_loop_utility_too_low_at_max(
+        self,
+        mock_judge_cls: MagicMock,
+        mock_attacker_cls: MagicMock,
+        mock_defender_cls: MagicMock,
+    ) -> None:
+        mock_defender = MagicMock()
+        mock_attacker = MagicMock()
+        mock_judge = MagicMock()
+        mock_defender_cls.return_value = mock_defender
+        mock_attacker_cls.return_value = mock_attacker
+        mock_judge_cls.return_value = mock_judge
+
+        mock_defender.run.return_value = DefenderOutput(
+            original_text="Original text",
+            rewritten_text="Anonymized text",
+            target_attributes=["Age"],
+            strategies_used=[StrategyRecord("Age", "abstraction", "Reason")],
+            confidence=0.9,
+            iteration=1,
+            ground_truth={"Age": "46"},
+        )
+        mock_attacker.run.return_value = AttackerOutput(
+            guesses={"Age": "UNKNOWN"},
+            reasoning={"Age": "No clues"},
+            confidence={"Age": 0.1},
+            successful_attributes=[],
+        )
+        mock_judge.score.return_value = UtilityOutput(
+            original_text="Original text",
+            rewritten_text="Anonymized text",
+            score=0.4,
+            rationale="Too much meaning was lost",
+        )
+
+        result = run_adversarial_loop(
+            text="Original text",
+            target_attributes=["Age"],
+            max_iterations=2,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.exit_reason, "utility_too_low_at_max")
+        self.assertEqual(result.total_iterations, 2)
+
+    @patch("veilwright.orchestrator.Defender")
+    @patch("veilwright.orchestrator.Attacker")
+    @patch("veilwright.orchestrator.UtilityJudge")
+    def test_ground_truth_is_carried_forward_after_iteration_one(
+        self,
+        mock_judge_cls: MagicMock,
+        mock_attacker_cls: MagicMock,
+        mock_defender_cls: MagicMock,
+    ) -> None:
+        mock_defender = MagicMock()
+        mock_attacker = MagicMock()
+        mock_judge = MagicMock()
+        mock_defender_cls.return_value = mock_defender
+        mock_attacker_cls.return_value = mock_attacker
+        mock_judge_cls.return_value = mock_judge
+
+        mock_defender.run.side_effect = [
+            DefenderOutput(
+                original_text="Original text",
+                rewritten_text="Anonymized text 1",
+                target_attributes=["Age"],
+                strategies_used=[StrategyRecord("Age", "abstraction", "Reason")],
+                confidence=0.9,
+                iteration=1,
+                ground_truth={"Age": "46"},
+            ),
+            DefenderOutput(
+                original_text="Original text",
+                rewritten_text="Anonymized text 2",
+                target_attributes=["Age"],
+                strategies_used=[StrategyRecord("Age", "omission", "Reason")],
+                confidence=0.9,
+                iteration=2,
+                ground_truth={"Age": "46"},
+            ),
+        ]
+        mock_attacker.run.side_effect = [
+            AttackerOutput(
+                guesses={"Age": "46"},
+                reasoning={"Age": "Age clue"},
+                confidence={"Age": 0.8},
+                successful_attributes=["Age"],
+            ),
+            AttackerOutput(
+                guesses={"Age": "UNKNOWN"},
+                reasoning={"Age": "No clues"},
+                confidence={"Age": 0.1},
+                successful_attributes=[],
+            ),
+        ]
+        mock_judge.score.return_value = UtilityOutput(
+            original_text="Original text",
+            rewritten_text="Anonymized text",
+            score=0.8,
+            rationale="Good utility",
+        )
+
+        run_adversarial_loop(
+            text="Original text",
+            target_attributes=["Age"],
+            max_iterations=2,
+        )
+
+        first_input = mock_defender.run.call_args_list[0].args[0]
+        second_input = mock_defender.run.call_args_list[1].args[0]
+        self.assertEqual(first_input.ground_truth, {})
+        self.assertEqual(second_input.ground_truth, {"Age": "46"})
+
+
+class TestNormalizeClueMap(unittest.TestCase):
+    def test_normalizes_known_attributes(self) -> None:
+        raw_clue_map = {
+            "Age": [
+                {"clue": "six years old", "type": "direct", "inference": "states age"}
+            ]
+        }
+        result = _normalize_clue_map(raw_clue_map, ["Age"])
+        self.assertEqual(len(result["Age"]), 1)
+        self.assertEqual(result["Age"][0]["clue"], "six years old")
+
+    def test_filters_unknown_attributes(self) -> None:
+        raw_clue_map = {
+            "Age": [{"clue": "clue", "type": "direct", "inference": "inf"}],
+            "Secret": [{"clue": "s", "type": "direct", "inference": "i"}],
+        }
+        result = _normalize_clue_map(raw_clue_map, ["Age"])
+        self.assertIn("Age", result)
+        self.assertNotIn("Secret", result)
+
+    def test_case_insensitive_lookup(self) -> None:
+        raw_clue_map = {
+            "age": [{"clue": "clue", "type": "direct", "inference": "inf"}],
+        }
+        result = _normalize_clue_map(raw_clue_map, ["Age"])
+        self.assertEqual(len(result["Age"]), 1)
+
+    def test_non_dict_returns_empty(self) -> None:
+        result = _normalize_clue_map("not a dict", ["Age"])
+        self.assertEqual(result, {})
+
+    def test_non_list_clues_returns_empty_list(self) -> None:
+        result = _normalize_clue_map({"Age": "not a list"}, ["Age"])
+        self.assertEqual(result["Age"], [])
+
+    def test_skips_non_dict_clue_entries(self) -> None:
+        result = _normalize_clue_map(
+            {"Age": [{"clue": "c", "type": "t", "inference": "i"}, "bad"]},
+            ["Age"],
+        )
+        self.assertEqual(len(result["Age"]), 1)
+
+
+class TestVerifiedSuccessfulAttributes(unittest.TestCase):
+    def test_verified_with_ground_truth(self) -> None:
+        attacker_output = AttackerOutput(
+            guesses={"Age": "46"},
+            reasoning={"Age": "clue"},
+            confidence={"Age": 0.8},
+            successful_attributes=["Age"],
+        )
+        result = _verified_successful_attributes(
+            attacker_output, ["Age"], {"Age": "46"}, 0.7
+        )
+        self.assertEqual(result, ["Age"])
+
+    def test_unverified_guess_wrong(self) -> None:
+        attacker_output = AttackerOutput(
+            guesses={"Age": "99"},
+            reasoning={"Age": "wrong"},
+            confidence={"Age": 0.9},
+            successful_attributes=["Age"],
+        )
+        result = _verified_successful_attributes(
+            attacker_output, ["Age"], {"Age": "46"}, 0.7
+        )
+        self.assertEqual(result, [])
+
+    def test_fallback_to_self_report_without_ground_truth(self) -> None:
+        attacker_output = AttackerOutput(
+            guesses={"Age": "46"},
+            reasoning={"Age": "clue"},
+            confidence={"Age": 0.8},
+            successful_attributes=["Age"],
+        )
+        result = _verified_successful_attributes(
+            attacker_output, ["Age"], {}, 0.7
+        )
+        self.assertEqual(result, ["Age"])
+
+
+class TestDefenderEdgeCases(unittest.TestCase):
+    def test_empty_text_raises(self) -> None:
+        defender = Defender(api_key="fake_key")
+        with self.assertRaisesRegex(DefenderError, "empty"):
+            defender.run(DefenderInput(text="  ", target_attributes=["Age"]))
+
+    def test_no_attributes_raises(self) -> None:
+        defender = Defender(api_key="fake_key")
+        with self.assertRaisesRegex(DefenderError, "attribute"):
+            defender.run(DefenderInput(text="Some text", target_attributes=[]))
+
+    def test_text_too_long_raises(self) -> None:
+        defender = Defender(api_key="fake_key")
+        long_text = "x" * 30000  # ~7500 tokens > 6000 limit
+        with self.assertRaisesRegex(DefenderError, "too long"):
+            defender.run(DefenderInput(text=long_text, target_attributes=["Age"]))
+
+    def test_extract_ground_truth_empty_attributes(self) -> None:
+        defender = Defender(api_key="fake_key")
+        result = defender.extract_ground_truth("Some text", [])
+        self.assertEqual(result, {})
+
+    def test_extract_ground_truth_handles_exception(self) -> None:
+        defender = Defender(api_key="fake_key")
+        defender._call_llm = MagicMock(side_effect=RuntimeError("API error"))
+        result = defender.extract_ground_truth("Some text", ["Age"])
+        self.assertEqual(result, {})
+
+
+class TestAttackerEdgeCases(unittest.TestCase):
+    def test_invalid_confidence_threshold(self) -> None:
+        with self.assertRaisesRegex(AttackerError, "confidence_threshold"):
+            Attacker(api_key="fake_key", confidence_threshold=1.5)
+
+        with self.assertRaisesRegex(AttackerError, "confidence_threshold"):
+            Attacker(api_key="fake_key", confidence_threshold=-0.1)
+
+
+class TestStrategies(unittest.TestCase):
+    def test_valid_strategy_names_matches_enum(self) -> None:
+        self.assertEqual(
+            VALID_STRATEGY_NAMES,
+            {"abstraction", "shifting", "omission"},
+        )
+
+    def test_rewrite_strategy_values(self) -> None:
+        self.assertEqual(RewriteStrategy.ABSTRACTION.value, "abstraction")
+        self.assertEqual(RewriteStrategy.SHIFTING.value, "shifting")
+        self.assertEqual(RewriteStrategy.OMISSION.value, "omission")
+
+
+class TestPrompts(unittest.TestCase):
+    def test_build_rewrite_prompt_contains_text_and_attributes(self) -> None:
+        prompt = build_rewrite_prompt(
+            text="Test text",
+            target_attributes=["Age", "Location"],
+        )
+        self.assertIn("Test text", prompt)
+        self.assertIn("Age", prompt)
+        self.assertIn("Location", prompt)
+
+    def test_build_rewrite_prompt_iteration_1_no_heavier_rewrite(self) -> None:
+        prompt = build_rewrite_prompt(
+            text="Test", target_attributes=["Age"], iteration=1
+        )
+        self.assertNotIn("heavier rewrite", prompt)
+
+    def test_build_rewrite_prompt_iteration_2_heavier_rewrite(self) -> None:
+        prompt = build_rewrite_prompt(
+            text="Test", target_attributes=["Age"], iteration=2
+        )
+        self.assertIn("heavier rewrite", prompt)
+
+    def test_build_utility_prompt_no_targets(self) -> None:
+        prompt = build_utility_prompt("orig", "rewritten")
+        self.assertIn("none provided", prompt)
+
+    def test_build_utility_prompt_with_targets(self) -> None:
+        prompt = build_utility_prompt("orig", "rewritten", ["Age"])
+        self.assertIn("Age", prompt)
+        self.assertNotIn("none provided", prompt)
+        self.assertNotIn('"score": 0.75', prompt)
+        self.assertIn("do not choose a default midpoint", prompt)
+
+    def test_build_clue_enumeration_prompt(self) -> None:
+        prompt = build_clue_enumeration_prompt("Some text", ["Age"])
+        self.assertIn("Some text", prompt)
+        self.assertIn("Age", prompt)
+        self.assertIn("clue_map", prompt)
+
+    def test_build_ground_truth_prompt(self) -> None:
+        prompt = build_ground_truth_prompt("Some text", ["Age"])
+        self.assertIn("Some text", prompt)
+        self.assertIn("Age", prompt)
+        self.assertIn("ground_truth", prompt)
+
+
+class TestVerifierTokenMatching(unittest.TestCase):
+    """Tests for the expanded verifier matching: event/figure attributes and overmatching prevention."""
+
+    def test_event_attribute_token_matching(self) -> None:
+        """'moon landing' matches 'Apollo 11 moon landing' for Exact Event."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth("moon landing", "Apollo 11 moon landing", "Exact Event")
+        )
+
+    def test_event_attribute_disjoint_no_match(self) -> None:
+        """Disjoint event guesses should not match."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth("Gemini program", "Apollo 11 moon landing", "Exact Event")
+        )
+
+    def test_figure_attribute_matching(self) -> None:
+        """'figure' keyword triggers token-subset matching."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth("Neil Armstrong", "Neil Alden Armstrong", "Public Figure")
+        )
+
+    def test_no_general_fallback_for_generic_attributes(self) -> None:
+        """Without a name/identity/event keyword, token-subset matching does NOT fire."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth("Barack Obama", "Barack Hussein Obama", "Target")
+        )
+
+    def test_no_overmatch_profession_with_intervening_words(self) -> None:
+        """'software development' should NOT match 'senior software development engineer' for Profession.
+
+        Substring matching does not fire here because 'software development' is not
+        contiguous in 'senior software development engineer'. Without the general
+        fallback, this correctly returns False.
+        """
+        self.assertFalse(
+            _compare_guess_to_ground_truth(
+                "software engineering", "senior software development engineer", "Profession"
+            )
+        )
+
+    def test_no_broad_substring_match_for_generic_attributes(self) -> None:
+        """Generic attributes do not get broad substring matching."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth("New York", "New York City Police Department", "Employer")
+        )
+
+    def test_location_allows_partial_place_match(self) -> None:
+        """Location-like attributes can match a contained place name."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth("New York", "New York City", "Location")
+        )
+
+    def test_role_allows_single_token_title_match(self) -> None:
+        """Role-like attributes can match a specific title token."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth(
+                "President",
+                "President of the United States",
+                "Political Office",
+            )
+        )
+
+    def test_role_allows_head_of_state_alias(self) -> None:
+        """A national head of state guess is a presidential-office leak."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth(
+                "National Head of State",
+                "44th president of the United States",
+                "Political Office",
+            )
+        )
+
+    def test_role_allows_legislator_senator_alias(self) -> None:
+        """Legislator and senator are close enough for office/profession leakage."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth(
+                "national legislator",
+                "U.S. senator representing Illinois",
+                "Political Office",
+            )
+        )
+
+    def test_profession_allows_public_servant_politician_alias(self) -> None:
+        """Public servant is a meaningful profession leak for politician."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth(
+                "public servant",
+                "politician",
+                "Profession",
+            )
+        )
+
+    def test_role_rejects_context_without_title(self) -> None:
+        """Role-like attributes should not match surrounding context only."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth(
+                "United States",
+                "President of the United States",
+                "Political Office",
+            )
+        )
+
+    def test_financial_attribute_matches_same_amount_in_phrase(self) -> None:
+        """Financial values match when the same standalone amount appears."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth("$300,000+", "$300,000 annually", "Income")
+        )
+
+    def test_no_fallback_for_unrelated_multi_word_profession(self) -> None:
+        """'data science' should NOT match 'data center operations manager' for Profession."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth("data science", "data center operations manager", "Profession")
+        )
+
+
+class TestParseDateValue(unittest.TestCase):
+    """Direct tests for _parse_date_value."""
+
+    def test_iso_format(self) -> None:
+        self.assertEqual(_parse_date_value("2024-01-15"), (2024, 1, 15))
+
+    def test_us_format(self) -> None:
+        self.assertEqual(_parse_date_value("01/15/2024"), (2024, 1, 15))
+
+    def test_month_name_first(self) -> None:
+        self.assertEqual(_parse_date_value("August 4, 1961"), (1961, 8, 4))
+
+    def test_day_month_name_year(self) -> None:
+        self.assertEqual(_parse_date_value("4 August 1961"), (1961, 8, 4))
+
+    def test_dot_separated(self) -> None:
+        self.assertEqual(_parse_date_value("04.08.1961"), (1961, 8, 4))
+
+    def test_abbreviated_month(self) -> None:
+        self.assertEqual(_parse_date_value("4 Aug 1961"), (1961, 8, 4))
+
+    def test_no_date_returns_none(self) -> None:
+        self.assertIsNone(_parse_date_value("hello world"))
+
+    def test_partial_date_returns_none(self) -> None:
+        self.assertIsNone(_parse_date_value("August 1961"))
+
+
+class TestDateTuple(unittest.TestCase):
+    """Direct tests for _date_tuple validation."""
+
+    def test_valid_date(self) -> None:
+        self.assertEqual(_date_tuple(2024, 1, 15), (2024, 1, 15))
+
+    def test_invalid_month(self) -> None:
+        self.assertIsNone(_date_tuple(2024, 13, 1))
+
+    def test_invalid_day(self) -> None:
+        self.assertIsNone(_date_tuple(2024, 1, 0))
+
+    def test_year_too_low(self) -> None:
+        self.assertIsNone(_date_tuple(999, 1, 1))
+
+
+class TestStringifyGroundTruthValue(unittest.TestCase):
+    """Tests for _stringify_ground_truth_value."""
+
+    def test_string_passthrough(self) -> None:
+        self.assertEqual(_stringify_ground_truth_value("hello"), "hello")
+
+    def test_list_values(self) -> None:
+        self.assertEqual(
+            _stringify_ground_truth_value(["president", "senator"]),
+            "president; senator",
+        )
+
+    def test_list_with_none(self) -> None:
+        self.assertEqual(
+            _stringify_ground_truth_value(["president", None, "senator"]),
+            "president; senator",
+        )
+
+    def test_dict_values(self) -> None:
+        result = _stringify_ground_truth_value({"office": "president", "term": "2009"})
+        self.assertIn("office: president", result)
+        self.assertIn("term: 2009", result)
+
+    def test_dict_with_none(self) -> None:
+        result = _stringify_ground_truth_value({"office": "president", "term": None})
+        self.assertIn("office: president", result)
+        self.assertNotIn("term", result)
+
+    def test_numeric_value(self) -> None:
+        self.assertEqual(_stringify_ground_truth_value(42), "42")
+
+
+class TestIterationFeedbackFallthrough(unittest.TestCase):
+    """Test the unreachable-from-loop fallthrough branch in _build_iteration_feedback."""
+
+    def test_attacker_failed_utility_pass_returns_attacker_feedback(self) -> None:
+        """When attacker fails and utility passes, returns plain attacker feedback.
+
+        This branch is unreachable from run_adversarial_loop (which exits early)
+        but exists for standalone callers.
+        """
+        attacker_output = AttackerOutput(
+            guesses={"Age": "UNKNOWN"},
+            reasoning={"Age": "No clues"},
+            confidence={"Age": 0.1},
+            successful_attributes=[],
+        )
+        feedback = _build_iteration_feedback(attacker_output, 0.9, 0.75, True)
+        self.assertIn("unable to guess", feedback)
+        self.assertNotIn("utility", feedback.lower())
+        self.assertNotIn("Privacy goal", feedback)
+
+
+class TestGeminiClientEdgeCases(unittest.TestCase):
+    """Edge case tests for GeminiClient."""
+
+    @patch.dict("os.environ", {"GEMINI_API_KEY": "studio-key"}, clear=True)
+    @patch("veilwright.llm_client.genai.Client")
+    def test_empty_response_exhaustion_raises(self, mock_client_cls: MagicMock) -> None:
+        """After EMPTY_RESPONSE_ATTEMPTS empty responses, raises error."""
+
+        class DummyError(Exception):
+            pass
+
+        client_obj = MagicMock()
+        empty_response = MagicMock()
+        empty_response.text = ""
+        client_obj.models.generate_content.return_value = empty_response
+        mock_client_cls.return_value = client_obj
+
+        client = GeminiClient(
+            model="gemini-test", label="test", error_type=DummyError
+        )
+
+        with self.assertRaises(DummyError) as ctx:
+            client.generate(["prompt"], "system", 128, 0.0)
+
+        self.assertIn("empty response", str(ctx.exception))
+        self.assertEqual(
+            client_obj.models.generate_content.call_count,
+            GeminiClient.EMPTY_RESPONSE_ATTEMPTS,
+        )
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_no_credentials_raises(self) -> None:
+        """GeminiClient raises when no credentials are available."""
+
+        class DummyError(Exception):
+            pass
+
+        with self.assertRaises(DummyError) as ctx:
+            GeminiClient(
+                model="gemini-test", label="test", error_type=DummyError
+            )
+
+        self.assertIn("No credentials found", str(ctx.exception))
+
+
+class TestBuildRepairPrompt(unittest.TestCase):
+    """Tests for the attacker _build_repair_prompt."""
+
+    def test_system_prompt_discourages_unknown_overuse(self) -> None:
+        prompt = _build_system_prompt(0.7)
+        self.assertIn("best-effort guess", prompt)
+        self.assertIn('Do not', prompt)
+        self.assertIn('overuse "UNKNOWN"', prompt)
+        self.assertIn("lower confidence", prompt)
+        self.assertIn("confidence of 0.0", prompt)
+
+    def test_repair_prompt_contains_required_fields(self) -> None:
+        prompt = _build_repair_prompt(
+            rewritten_text="Some anonymized text.",
+            target_attributes=["Age", "Location"],
+            confidence_threshold=0.7,
+            previous_error="JSON parse error",
+        )
+        self.assertIn("Some anonymized text.", prompt)
+        self.assertIn("Age", prompt)
+        self.assertIn("Location", prompt)
+        self.assertIn("JSON parse error", prompt)
+        self.assertIn("0.70", prompt)
+        self.assertIn("guesses", prompt)
+        self.assertIn("reasoning", prompt)
+        self.assertIn("confidence", prompt)
+        self.assertIn("successful_attributes", prompt)
+
+
+class TestAttackerMissingAttributeBackfill(unittest.TestCase):
+    """Test that the Attacker backfills missing attributes with UNKNOWN."""
+
+    def test_missing_attributes_backfilled(self) -> None:
+        attacker = Attacker(api_key="fake_key")
+        # Provide a valid, complete response for both attributes, but
+        # simulate a case where the LLM puts UNKNOWN for Location and
+        # confidence below threshold so it's not in successful_attributes.
+        valid_response = json.dumps({
+            "guesses": {"Age": "46", "Location": "UNKNOWN"},
+            "reasoning": {"Age": "clue", "Location": "No location clues."},
+            "confidence": {"Age": 0.8, "Location": 0.0},
+            "successful_attributes": ["Age"],
+        })
+        attacker._call_llm = MagicMock(return_value=valid_response)
+
+        output = attacker.run("Rewritten text", ["Age", "Location"])
+
+        self.assertEqual(output.guesses["Location"], "UNKNOWN")
+        self.assertEqual(output.confidence["Location"], 0.0)
+        # Location should NOT be in successful_attributes
+        self.assertNotIn("Location", output.successful_attributes)
+        # Age should be there
+        self.assertEqual(output.guesses["Age"], "46")
+        self.assertIn("Age", output.successful_attributes)
+
+    def test_unknown_confidence_is_normalized_to_zero(self) -> None:
+        attacker = Attacker(api_key="fake_key")
+        valid_response = json.dumps({
+            "guesses": {"Identity": "UNKNOWN"},
+            "reasoning": {"Identity": "No identifying clues remain."},
+            "confidence": {"Identity": 1.0},
+            "successful_attributes": ["Identity"],
+        })
+        attacker._call_llm = MagicMock(return_value=valid_response)
+
+        output = attacker.run("A vague rewritten text.", ["Identity"])
+
+        self.assertEqual(output.guesses["Identity"], "UNKNOWN")
+        self.assertEqual(output.confidence["Identity"], 0.0)
+        self.assertEqual(output.successful_attributes, [])

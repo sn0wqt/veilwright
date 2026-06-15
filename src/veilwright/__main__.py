@@ -1,4 +1,4 @@
-"""CLI entry point for the Defender agent."""
+"""CLI entry point for the Veilwright semantic anonymization toolkit."""
 
 import json
 import os
@@ -13,20 +13,55 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from defender.defender import Defender, DefenderError
-from defender.attacker import AttackerError
-from defender.utility import UtilityError
-from defender.orchestrator import run_adversarial_loop
-from defender.types import DefenderInput, DefenderOutput
+from veilwright.defender import Defender, DefenderError, run_anonymizer
+from veilwright.attacker import Attacker, AttackerError
+from veilwright.utility import UtilityJudge, UtilityError
+from veilwright.orchestrator import run_adversarial_loop
+from veilwright.types import DefenderInput, DefenderOutput, AdversarialResult
+from veilwright.utils import is_guess_correct
 
 load_dotenv()
 
 app = typer.Typer(
-    name="defender",
-    help="Defender agent — semantic text anonymization for adversarial PII protection.",
+    name="veilwright",
+    help="Veilwright: adversarial multi-agent semantic anonymization.",
     add_completion=False,
 )
 console = Console()
+
+
+def _resolve_text_input(text: str | None, file: Path | None) -> str:
+    """Return CLI text from --text or --file, enforcing exactly one source."""
+    if text and file:
+        console.print(
+            "[bold red]Error:[/bold red] Provide either --text or --file, not both."
+        )
+        raise typer.Exit(code=1)
+    if not text and not file:
+        console.print("[bold red]Error:[/bold red] Provide either --text or --file.")
+        raise typer.Exit(code=1)
+
+    if file:
+        try:
+            text = file.read_text(encoding="utf-8")
+        except Exception as exc:
+            console.print(f"[bold red]Error reading file:[/bold red] {exc}")
+            raise typer.Exit(code=1)
+
+    resolved = text or ""
+    if not resolved.strip():
+        console.print("[bold red]Error:[/bold red] Input text is empty.")
+        raise typer.Exit(code=1)
+    return resolved
+
+
+def _parse_attributes(attributes: str) -> list[str]:
+    """Parse a comma-separated CLI attribute string."""
+    attr_list = [a.strip() for a in attributes.split(",") if a.strip()]
+    if not attr_list:
+        console.print("[bold red]Error:[/bold red] No attributes provided.")
+        raise typer.Exit(code=1)
+    return attr_list
 
 
 @app.command("models")
@@ -36,14 +71,18 @@ def list_models() -> None:
     credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
 
-    if not api_key and not (credentials_path and project_id):
+    has_vertex_credentials = bool(
+        credentials_path and project_id and Path(credentials_path).exists()
+    )
+
+    if not api_key and not has_vertex_credentials:
         console.print(
             "[bold red]Error:[/bold red] Set GEMINI_API_KEY for AI Studio, "
             "or GOOGLE_APPLICATION_CREDENTIALS and GOOGLE_CLOUD_PROJECT for Vertex AI."
         )
         raise typer.Exit(code=1)
 
-    if credentials_path and project_id:
+    if has_vertex_credentials:
         location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
         client = genai.Client(vertexai=True, project=project_id, location=location)
     else:
@@ -105,7 +144,7 @@ def defend(
         1,
         "--iterations",
         "-n",
-        help="Number of defender iterations to run.",
+        help="Number of Defender rewrite iterations for this single-agent command.",
         min=1,
     ),
     model: str = typer.Option(
@@ -132,35 +171,10 @@ def defend(
         help="Show all detected PII entities, not just masked ones.",
     ),
 ) -> None:
-    """Run the Defender agent on the given text and target attributes."""
+    """Run the Defender agent to anonymize target attributes in a single pass."""
 
-    # --- resolve input ---
-    if text and file:
-        console.print(
-            "[bold red]Error:[/bold red] Provide either --text or --file, not both."
-        )
-        raise typer.Exit(code=1)
-    if not text and not file:
-        console.print("[bold red]Error:[/bold red] Provide either --text or --file.")
-        raise typer.Exit(code=1)
-
-    if file:
-        try:
-            text = file.read_text(encoding="utf-8")
-        except Exception as exc:
-            console.print(f"[bold red]Error reading file:[/bold red] {exc}")
-            raise typer.Exit(code=1)
-
-    attr_list = [a.strip() for a in attributes.split(",") if a.strip()]
-    if not attr_list:
-        console.print("[bold red]Error:[/bold red] No attributes provided.")
-        raise typer.Exit(code=1)
-
-    try:
-        defender = Defender(model=model)
-    except DefenderError as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-        raise typer.Exit(code=1)
+    resolved_text = _resolve_text_input(text, file)
+    attr_list = _parse_attributes(attributes)
 
     # ground truth is extracted once on iteration 1 then carried forward so
     # every iteration in the output shows the same consistent values
@@ -170,7 +184,7 @@ def defend(
 
     for iteration in range(1, iterations + 1):
         defender_input = DefenderInput(
-            text=text,
+            text=resolved_text,
             target_attributes=attr_list,
             iteration=iteration,
             attacker_feedback=attacker_feedback,
@@ -178,7 +192,7 @@ def defend(
         )
 
         try:
-            result = defender.run(defender_input)
+            result = run_anonymizer(defender_input, model=model)
         except DefenderError as exc:
             console.print(f"[bold red]Defender error:[/bold red] {exc}")
             raise typer.Exit(code=1)
@@ -207,9 +221,6 @@ def defend(
             raise typer.Exit(code=1)
 
 
-# ---------------------------------------------------------------------------
-# Output formatting
-# ---------------------------------------------------------------------------
 
 def _format_txt_block(result: DefenderOutput, iteration: int, total: int) -> str:
     """Format one iteration as a plain-text block for the output file."""
@@ -218,14 +229,14 @@ def _format_txt_block(result: DefenderOutput, iteration: int, total: int) -> str
     lines.append(f"=== Iteration {iteration}/{total} ===")
     lines.append("")
 
-    # ground truth — present on every iteration since it's carried forward
+    # ground truth - present on every iteration since it's carried forward
     if result.ground_truth:
         lines.append("Ground Truth:")
         for attr, val in result.ground_truth.items():
             lines.append(f"  {attr}: {val}")
         lines.append("")
 
-    # clue map — only populated on iteration 1 (pre-pass doesn't re-run on retries)
+    # clue map - only populated on iteration 1 (pre-pass doesn't re-run on retries)
     if result.clue_map:
         lines.append("Identified Clues:")
         for attr, clues in result.clue_map.items():
@@ -289,17 +300,17 @@ def adversarial_loop(
         min=1,
     ),
     defender_model: str = typer.Option(
-        "gemini-2.5-flash",
+        Defender.DEFAULT_MODEL,
         "--defender-model",
         help="Gemini model to use for the Defender.",
     ),
     attacker_model: str = typer.Option(
-        "gemini-3-flash-preview",
+        Attacker.DEFAULT_MODEL,
         "--attacker-model",
         help="Gemini model to use for the Attacker.",
     ),
     utility_model: str = typer.Option(
-        "gemini-2.5-flash",
+        UtilityJudge.DEFAULT_MODEL,
         "--utility-model",
         help="Gemini model to use for the Utility Judge.",
     ),
@@ -307,6 +318,13 @@ def adversarial_loop(
         0.75,
         "--utility-threshold",
         help="Pass threshold for utility score (0.0-1.0).",
+        min=0.0,
+        max=1.0,
+    ),
+    confidence_threshold: float = typer.Option(
+        0.7,
+        "--confidence-threshold",
+        help="Minimum attacker confidence for a guess to count as successful.",
         min=0.0,
         max=1.0,
     ),
@@ -323,36 +341,19 @@ def adversarial_loop(
 ) -> None:
     """Run the full Defender -> Attacker -> Utility adversarial loop."""
 
-    if text and file:
-        console.print(
-            "[bold red]Error:[/bold red] Provide either --text or --file, not both."
-        )
-        raise typer.Exit(code=1)
-    if not text and not file:
-        console.print("[bold red]Error:[/bold red] Provide either --text or --file.")
-        raise typer.Exit(code=1)
-
-    if file:
-        try:
-            text = file.read_text(encoding="utf-8")
-        except Exception as exc:
-            console.print(f"[bold red]Error reading file:[/bold red] {exc}")
-            raise typer.Exit(code=1)
-
-    attr_list = [a.strip() for a in attributes.split(",") if a.strip()]
-    if not attr_list:
-        console.print("[bold red]Error:[/bold red] No attributes provided.")
-        raise typer.Exit(code=1)
+    resolved_text = _resolve_text_input(text, file)
+    attr_list = _parse_attributes(attributes)
 
     try:
         result = run_adversarial_loop(
-            text=text,
+            text=resolved_text,
             target_attributes=attr_list,
             max_iterations=iterations,
             defender_model=defender_model,
             attacker_model=attacker_model,
             utility_model=utility_model,
             utility_threshold=utility_threshold,
+            confidence_threshold=confidence_threshold,
         )
     except (DefenderError, AttackerError, UtilityError) as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
@@ -369,7 +370,100 @@ def adversarial_loop(
     if output_json:
         console.print_json(json.dumps(payload, indent=2))
     else:
-        console.print(payload)
+        _pretty_print_adversarial(result)
+
+
+def _pretty_print_adversarial(result: AdversarialResult, verbose: bool = False) -> None:
+    """Render an AdversarialResult with rich formatting."""
+    console.print()
+    console.rule("[bold cyan]Adversarial Loop Results[/bold cyan]")
+
+    for it in result.iterations:
+        # Re-use the existing _pretty_print to show the defender's details for this iteration
+        _pretty_print(it.defender_output, it.iteration, len(result.iterations), verbose)
+
+        # Show Attacker output for this iteration
+        console.print()
+        attacker_table = Table(
+            title=f"Attacker Analysis — Iteration {it.iteration}",
+            show_header=True,
+            header_style="bold red",
+        )
+        attacker_table.add_column("Attribute", style="cyan", min_width=15)
+        attacker_table.add_column("Attacker Guess", style="white", min_width=20)
+        attacker_table.add_column("Confidence", style="magenta", justify="right")
+        attacker_table.add_column("Reasoning", style="dim", max_width=60)
+        attacker_table.add_column("Guessed Correctly", style="bold", justify="center")
+
+        for attr in it.defender_output.target_attributes:
+            guess = it.attacker_output.guesses.get(attr, "UNKNOWN")
+            conf = it.attacker_output.confidence.get(attr, 0.0)
+            reasoning = it.attacker_output.reasoning.get(attr, "No reasoning provided")
+
+            truth = it.defender_output.ground_truth.get(attr)
+
+            if truth and truth.strip():
+                is_correct = is_guess_correct(
+                    guess,
+                    truth,
+                    conf,
+                    attr,
+                    result.confidence_threshold,
+                )
+            else:
+                is_correct = attr in it.attacker_output.successful_attributes
+
+            status = "[green]Yes[/green]" if is_correct else "[red]No[/red]"
+            attacker_table.add_row(
+                attr,
+                guess,
+                f"{conf*100:.0f}%",
+                reasoning,
+                status
+            )
+        console.print(attacker_table)
+
+        # Show Utility Judge output
+        console.print()
+        utility_table = Table(
+            title=f"Utility Evaluation — Iteration {it.iteration}",
+            show_header=True,
+            header_style="bold green",
+        )
+        utility_table.add_column("Metric", style="cyan", min_width=15)
+        utility_table.add_column("Value", style="white")
+        utility_table.add_row("Utility Score", f"{it.utility_output.score * 100:.0f}%")
+        utility_table.add_row("Threshold Passed", "[green]Yes[/green]" if it.utility_pass else "[red]No[/red]")
+        utility_table.add_row("Rationale", it.utility_output.rationale)
+        console.print(utility_table)
+        console.print()
+
+    # Final Summary Panel
+    success_style = "bold green" if result.success else "bold red"
+    success_text = "SUCCESS" if result.success else "FAILED"
+
+    summary_lines = [
+        f"[bold]Result Status:[/bold] [{success_style}]{success_text}[/{success_style}]",
+        f"[bold]Exit Reason:[/bold] {result.exit_reason}",
+        f"[bold]Total Iterations:[/bold] {result.total_iterations}",
+        f"[bold]Final Utility Score:[/bold] {result.final_utility_score * 100:.0f}%",
+        f"[bold]Attacker Confidence Threshold:[/bold] {result.confidence_threshold:.0%}",
+    ]
+
+    if result.ground_truth:
+        summary_lines.append("\n[bold]Ground Truth Protected Attributes:[/bold]")
+        for k, v in result.ground_truth.items():
+            summary_lines.append(f"  - {k}: {v}")
+
+    console.print(
+        Panel(
+            "\n".join(summary_lines),
+            title="[bold cyan]Final Adversarial Summary[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2)
+        )
+    )
+    console.print()
 
 
 def _pretty_print(
@@ -423,7 +517,7 @@ def _pretty_print(
 
         if pii_to_show:
             pii_table = Table(
-                title="PII Detected by Scanner (NER + Regex)",
+                title="PII Detected by Scanner",
                 show_header=True,
                 header_style="bold magenta",
             )
