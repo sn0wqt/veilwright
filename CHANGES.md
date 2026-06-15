@@ -10,7 +10,7 @@ This document summarizes the feedback received during the poster session and how
 
 We did not build a separate service wrapper because this project is a research proof-of-concept, and the feedback itself noted that a wrapper was probably not necessary for evaluation. Instead, we exposed the core functionality through simple interfaces:
 
-- `run_anonymizer()` / `run_defender()` for a single anonymization pass.
+- `run_anonymizer()` for a single anonymization pass.
 - `run_adversarial_loop()` for the full Defender/Attacker/Utility Judge loop.
 - `veilwright anonymize` and `veilwright adversarial` CLI commands for manual testing.
 - `README.md` documenting setup, configuration, CLI usage, API usage, and the
