@@ -12,6 +12,8 @@ load_dotenv()
 class GeminiClient:
     """Small wrapper around Gemini generation with credential and fallback handling."""
 
+    EMPTY_RESPONSE_ATTEMPTS = 4
+
     def __init__(
         self,
         model: str,
@@ -58,6 +60,7 @@ class GeminiClient:
         system_prompt: str,
         max_output_tokens: int,
         temperature: float,
+        response_mime_type: str | None = None,
     ) -> str:
         """Generate text with the primary client, falling back on rate limits."""
         try:
@@ -67,6 +70,7 @@ class GeminiClient:
                 system_prompt,
                 max_output_tokens,
                 temperature,
+                response_mime_type,
             )
         except self._error_type as exc:
             err_str = str(exc)
@@ -86,6 +90,7 @@ class GeminiClient:
                     system_prompt,
                     max_output_tokens,
                     temperature,
+                    response_mime_type,
                 )
                 self._client = fallback_client
                 self._fallback_client = None
@@ -99,28 +104,36 @@ class GeminiClient:
         system_prompt: str,
         max_output_tokens: int,
         temperature: float,
+        response_mime_type: str | None,
     ) -> str:
         """Send a Gemini request using a concrete client."""
         if client is None:
             raise self._error("Gemini client was not initialized.")
 
+        config: dict[str, object] = {
+            "system_instruction": system_prompt,
+            "max_output_tokens": max_output_tokens,
+            "temperature": temperature,
+        }
+        if response_mime_type:
+            config["response_mime_type"] = response_mime_type
+
         try:
-            response = client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config={
-                    "system_instruction": system_prompt,
-                    "max_output_tokens": max_output_tokens,
-                    "temperature": temperature,
-                },
-            )
-            text = response.text
-            if not text:
-                raise self._error(
-                    "Gemini returned an empty response. The input may be too "
-                    "long or the content may have been blocked."
+            for _ in range(self.EMPTY_RESPONSE_ATTEMPTS):
+                response = client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=config,
                 )
-            return text
+                text = response.text
+                if text:
+                    return text
+
+            raise self._error(
+                f"[{self.label}] Gemini model {self.model} returned an empty "
+                f"response after {self.EMPTY_RESPONSE_ATTEMPTS} attempts. The "
+                "input may be too long, temporarily unavailable, or blocked."
+            )
         except self._error_type:
             raise
         except Exception as exc:

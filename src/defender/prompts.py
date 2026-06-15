@@ -32,6 +32,8 @@ RULES:
 - You MUST reason step-by-step about each target attribute before rewriting.
 - For each attribute, identify ALL clues in the text that could reveal it.
 - Choose the lightest-touch strategy that removes inferability.
+- Do NOT replace direct clues with famous paraphrases, near-synonyms, or \
+uniquely identifying descriptions that preserve the same inference chain.
 - The rewritten text must read naturally — no placeholders, no brackets, \
 no meta-commentary.
 - Maintain internal consistency: if you shift one detail, adjust all \
@@ -45,7 +47,7 @@ related details to match.
 
 
 ANALYSIS_SYSTEM_PROMPT = """\
-You are a privacy analysis assistant. Your task is to carefully analyze text \
+You are a privacy analysis module. Your task is to carefully analyze text \
 and extract information or identify inference patterns as requested.
 
 Be thorough, precise, and return your response as valid JSON (and nothing else).
@@ -130,8 +132,14 @@ surface text, reason to the underlying fact.
 For example: "I was six years old when I watched the moon landing" → \
 Birth Year = 1963 (inferred: 1969 − 6 = 1963).
 
+For "Age", extract the age associated with the narrator/person as described \
+directly in the text (e.g., "when I was six years old" means the relevant age \
+is 6). Do NOT calculate the narrator's current age in the present day unless \
+the text is set in the present day or explicitly states it.
+
 Include financial attributes such as income, salary, or earnings — extract the \
-specific value or range stated in the text (e.g. "Income": "$300,000+").
+specific value or range stated in the text. For example, if a requested \
+financial attribute is stated as "$300,000+", return that exact value.
 
 Target attributes:
 {attributes_list}
@@ -200,8 +208,9 @@ is a privacy failure):
         prompt += f"""
 This is iteration {iteration}. Your previous rewrite achieved privacy but lost \
 too much meaning. Apply lighter-touch strategies this iteration: preserve more \
-non-sensitive narrative structure, relationships, tone, and detail while still \
-keeping the target attributes hidden.
+non-sensitive narrative structure, relationships, tone, and detail. Do not \
+restore original target-revealing clues, known inference chains, or equivalent \
+paraphrases while keeping the target attributes hidden.
 """
     elif iteration > 1:
         prompt += f"""
@@ -219,8 +228,8 @@ ATTACKER FEEDBACK FROM PREVIOUS ROUND:
 
 Use this feedback to decide whether the next rewrite should harden privacy, \
 recover utility, or balance both. If the feedback says privacy was already \
-achieved, preserve more non-sensitive meaning without reintroducing the target \
-attributes.
+achieved, preserve more non-sensitive meaning without reintroducing target \
+attributes, original clues, known inference chains, or equivalent paraphrases.
 """
 
     if clue_map:
@@ -296,12 +305,18 @@ REWRITTEN TEXT:
 {rewritten_text}
 \"\"\"
 
-Return ONLY a JSON object with this exact structure (no markdown fences, no extra text):
+Score only non-sensitive meaning preservation. Do not treat the score as a
+pass/fail threshold, and do not choose a default midpoint. Choose the value that
+best reflects the rewritten text:
+- 0.90-1.00: nearly all non-sensitive meaning is preserved.
+- 0.75-0.89: the core meaning is preserved, with some acceptable detail loss.
+- 0.50-0.74: the main topic remains, but important non-sensitive details are lost.
+- 0.25-0.49: only a vague fragment of the original meaning remains.
+- 0.00-0.24: the rewrite is mostly unrelated, contradictory, or empty.
 
-{{
-    "score": 0.75,
-    "rationale": "<brief explanation of preserved and lost non-sensitive meaning>"
-}}
+Return ONLY a valid JSON object with exactly two fields:
+- "score": your numeric score between 0.0 and 1.0
+- "rationale": a brief explanation of preserved and lost non-sensitive meaning
 """
 
 

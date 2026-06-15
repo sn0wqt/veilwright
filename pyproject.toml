@@ -1,9 +1,12 @@
 [project]
 name = "defender"
 version = "0.1.0"
-description = "The Defender agent — semantic text anonymization for adversarial multi-agent PII protection."
+description = "Adversarial multi-agent semantic text anonymization system (Defender, Attacker, and Utility Judge)."
 authors = [
-    {name = "Asaad Falah Rasul", email = "asadfalah2@gmail.com"},
+    {name = "Leonid Romanov"},
+    {name = "Ahmed Al-Durrah"},
+    {name = "Rasul Asaad", email = "asaad.rasul@student.tuwien.ac.at"},
+    {name = "Julius Greiff"},
 ]
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,7 +17,7 @@ dependencies = [
     "typer>=0.15.0",
     "phonenumbers>=9.0.23",
     "spacy>=3.8.13",
-    "en-core-web-lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 
 [project.scripts]
@@ -23,6 +26,9 @@ defender = "defender.__main__:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.2,<10.0.0",
+]
+large = [
+    "en-core-web-lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl",
 ]
 
 [build-system]

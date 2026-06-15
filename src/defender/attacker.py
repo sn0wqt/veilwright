@@ -1,26 +1,35 @@
 """Attacker agent: tries to de-anonymize rewritten text targeting specific attributes."""
 
+from json import JSONDecodeError
+
 from defender.llm_client import GeminiClient
 from defender.types import AttackerOutput
-from defender.utils import parse_validated_llm_json
+from defender.utils import parse_llm_json, parse_validated_llm_json
 
 
 def _build_system_prompt(confidence_threshold: float) -> str:
     """Build the Attacker system prompt with the active confidence threshold."""
     return f"""You are an adversarial Attacker agent in a multi-agent semantic anonymization system.
 
-Your goal is to de-anonymize the rewritten text by inferring specific target attributes about the subject of the text.
+Your goal is to red-team a defensive anonymization system by inferring the
+requested target attributes from the rewritten text. This is a privacy
+evaluation task for improving anonymization quality.
 
-You MUST think step-by-step using chain-of-thought reasoning to analyze the clues remaining in the text and infer the actual value for each target attribute.
 For each target attribute:
-1. Walk through the clues, contextual hints, and temporal/relational markers.
-2. Make your best guess for the attribute value. If an attribute genuinely cannot be inferred from the text (i.e. no clues remain), use "UNKNOWN".
+1. Analyze the clues, contextual hints, and temporal/relational markers.
+2. Make the most specific best-effort guess supported by the text. Do not
+   overuse "UNKNOWN": if the text supports a broad category or plausible value,
+   return that guess with lower confidence rather than hiding uncertainty.
+   Use "UNKNOWN" only when no meaningful clue remains for that attribute, and
+   assign "UNKNOWN" a confidence of 0.0.
 3. Assign a confidence score from 0.0 to 1.0 indicating how certain you are of your guess.
 
 You MUST include exactly one entry for every requested target attribute in
 `guesses`, `reasoning`, and `confidence`. Do not include attributes outside
-the requested target list. In `reasoning`, explicitly name the clues you used;
-if no clue remains, explain why the value is UNKNOWN.
+the requested target list. In `reasoning`, provide a concise step-by-step
+inference summary that explicitly names the clues you used. If you make a
+low-confidence guess, explain why it is uncertain. If no clue remains, explain
+why the value is UNKNOWN.
 In `successful_attributes`, include only requested attributes where confidence
 is >= {confidence_threshold:.2f} and the guess is not "UNKNOWN".
 
@@ -60,6 +69,52 @@ Respond now with the corrected JSON:
 """
 
 
+def _build_repair_prompt(
+    rewritten_text: str,
+    target_attributes: list[str],
+    confidence_threshold: float,
+    previous_error: str,
+) -> str:
+    """Build a standalone final-repair prompt for malformed attacker output."""
+    attributes_list = "\n".join(f"  - {attr}" for attr in target_attributes)
+    return f"""Your previous attacker response could not be parsed as valid JSON.
+
+Previous parser error:
+{previous_error}
+
+Return ONLY one raw JSON object. Do not include markdown, commentary, apologies,
+or text outside the JSON object. Make best-effort guesses when clues support a
+broad or uncertain value, using lower confidence for uncertainty. Use "UNKNOWN"
+with confidence 0.0 only when no meaningful clue remains.
+
+Target attributes:
+{attributes_list}
+
+Rewritten text:
+\"\"\"
+{rewritten_text}
+\"\"\"
+
+Required JSON object:
+{{
+  "guesses": {{
+    "<attribute_name>": "<best guess or UNKNOWN>"
+  }},
+  "reasoning": {{
+    "<attribute_name>": "<brief clue-based inference summary>"
+  }},
+  "confidence": {{
+    "<attribute_name>": 0.0
+  }},
+  "successful_attributes": []
+}}
+
+Only include requested attributes. Include a name in `successful_attributes`
+only when its confidence is >= {confidence_threshold:.2f} and its guess is not
+"UNKNOWN".
+"""
+
+
 class AttackerError(Exception):
     """Raised when the Attacker encounters an unrecoverable error."""
 
@@ -67,7 +122,7 @@ class AttackerError(Exception):
 class Attacker:
     """Attacker wrapper around Gemini calls."""
 
-    DEFAULT_MODEL = "gemini-3-flash-preview"
+    DEFAULT_MODEL = "gemini-2.5-flash"
     MAX_TOKENS = 4096
 
     def __init__(
@@ -97,18 +152,43 @@ class Attacker:
         prompt = self._build_prompt(rewritten_text, target_attributes)
         raw_response = self._call_llm([prompt])
 
-        parsed = parse_validated_llm_json(
-            initial_text=raw_response,
-            retry=lambda: self._call_llm(
-                [prompt, _build_retry_prompt(self.confidence_threshold)]
-            ),
-            validate=lambda data: self._validate_response(data, target_attributes),
-            error_type=AttackerError,
-            parse_error_message="Failed to parse Attacker JSON after retry: {error}",
-            validation_error_message=(
-                "Attacker response failed validation after retry: {errors}"
-            ),
-        )
+        try:
+            parsed = parse_validated_llm_json(
+                initial_text=raw_response,
+                retry=lambda: self._call_llm(
+                    [prompt, _build_retry_prompt(self.confidence_threshold)]
+                ),
+                validate=lambda data: self._validate_response(data, target_attributes),
+                error_type=AttackerError,
+                parse_error_message="Failed to parse Attacker JSON after retry: {error}",
+                validation_error_message=(
+                    "Attacker response failed validation after retry: {errors}"
+                ),
+            )
+        except AttackerError as exc:
+            repair_prompt = _build_repair_prompt(
+                rewritten_text=rewritten_text,
+                target_attributes=target_attributes,
+                confidence_threshold=self.confidence_threshold,
+                previous_error=str(exc),
+            )
+            repair_response = self._call_llm([repair_prompt], temperature=0.0)
+            try:
+                parsed = parse_llm_json(repair_response)
+            except JSONDecodeError as repair_exc:
+                snippet = repair_response[:500].replace("\n", "\\n")
+                raise AttackerError(
+                    "Failed to parse Attacker JSON after final repair attempt: "
+                    f"{repair_exc}. Raw repair response starts with: {snippet!r}"
+                ) from repair_exc
+
+            errors = self._validate_response(parsed, target_attributes)
+            if errors:
+                raise AttackerError(
+                    "Attacker response failed validation after final repair "
+                    f"attempt: {errors}"
+                ) from exc
+            raw_response = repair_response
 
         # Ensure all target attributes exist in parsed output and recompute successes.
         guesses_raw = parsed.get("guesses", {})
@@ -137,6 +217,9 @@ class Attacker:
             try:
                 confidence[attr] = float(confidence_values.get(attr, 0.0))
             except (ValueError, TypeError):
+                confidence[attr] = 0.0
+
+            if guesses[attr].strip().upper() == "UNKNOWN":
                 confidence[attr] = 0.0
 
             if (
@@ -211,11 +294,12 @@ Return the result as a valid JSON object matching the requested schema.
                     )
         return errors
 
-    def _call_llm(self, contents: list[str]) -> str:
+    def _call_llm(self, contents: list[str], temperature: float = 0.7) -> str:
         """Send contents to Gemini through the shared client."""
         return self._llm.generate(
             contents=contents,
             system_prompt=_build_system_prompt(self.confidence_threshold),
             max_output_tokens=self.MAX_TOKENS,
-            temperature=0.7,
+            temperature=temperature,
+            response_mime_type="application/json",
         )

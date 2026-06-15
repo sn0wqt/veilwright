@@ -358,7 +358,7 @@ name = "defender"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "en-core-web-lg" },
+    { name = "en-core-web-sm" },
     { name = "google-genai" },
     { name = "phonenumbers" },
     { name = "python-dotenv" },
@@ -371,10 +371,14 @@ dependencies = [
 dev = [
     { name = "pytest" },
 ]
+large = [
+    { name = "en-core-web-lg" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "en-core-web-lg", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl" },
+    { name = "en-core-web-lg", marker = "extra == 'large'", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl" },
+    { name = "en-core-web-sm", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" },
     { name = "google-genai", specifier = ">=1.0.0" },
     { name = "phonenumbers", specifier = ">=9.0.23" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2,<10.0.0" },
@@ -383,7 +387,7 @@ requires-dist = [
     { name = "spacy", specifier = ">=3.8.13" },
     { name = "typer", specifier = ">=0.15.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "large"]
 
 [[package]]
 name = "distro"
@@ -400,6 +404,14 @@ version = "3.8.0"
 source = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl" }
 wheels = [
     { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl", hash = "sha256:293e9547a655b25499198ab15a525b05b9407a75f10255e405e8c3854329ab63" },
+]
+
+[[package]]
+name = "en-core-web-sm"
+version = "3.8.0"
+source = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+wheels = [
+    { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl", hash = "sha256:1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85" },
 ]
 
 [[package]]

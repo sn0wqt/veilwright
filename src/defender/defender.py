@@ -52,14 +52,14 @@ class Defender:
                 f"Maximum supported: ~6000 tokens to leave room for prompt and output."
             )
 
-        # --- Step 1: auto-extract ground truth if caller didn't provide it ---
+        # auto-extract ground truth if caller didn't provide it
         ground_truth = dict(defender_input.ground_truth)
         if defender_input.iteration == 1 and not ground_truth:
             ground_truth = self.extract_ground_truth(
                 defender_input.text, defender_input.target_attributes
             )
 
-        # --- Step 2: scan for explicit PII ---
+        # scan for explicit PII
         scan_result = scan_text(defender_input.text)
         syntactic_pii = [
             f"{m.pii_type}: {m.value} [{'masked' if m.mask else 'detected'}]"
@@ -69,14 +69,14 @@ class Defender:
         # send masked text to LLM so we don't leak raw emails/phones/etc
         text_for_llm = scan_result.masked_text
 
-        # --- Step 3: clue enumeration pre-pass (iteration 1 only) ---
+        # clue enumeration pre-pass (iteration 1 only)
         # On retries the attacker_feedback already tells us what clues slipped through,
         # so we don't need to re-enumerate from scratch.
         clue_map: dict[str, list[dict[str, str]]] = {}
         if defender_input.iteration == 1 and defender_input.target_attributes:
             clue_map = self._enumerate_clues(text_for_llm, defender_input.target_attributes)
 
-        # --- Step 4: build the rewrite prompt with clue map baked in ---
+        # build the rewrite prompt with clue map baked in
         user_prompt = build_rewrite_prompt(
             text=text_for_llm,
             target_attributes=defender_input.target_attributes,
@@ -85,11 +85,11 @@ class Defender:
             clue_map=clue_map or None,
         )
 
-        # --- Step 5: call the LLM ---
+        # call the LLM
         contents = [user_prompt]
         llm_response_text = self._call_llm(contents)
 
-        # --- Step 6: parse and validate ---
+        # parse and validate
         parsed = parse_validated_llm_json(
             initial_text=llm_response_text,
             retry=lambda: self._call_llm([user_prompt, RETRY_PROMPT]),
@@ -101,7 +101,7 @@ class Defender:
             validation_error_message="LLM response failed validation after retry: {errors}",
         )
 
-        # --- Step 7: build output ---
+        # build output
         strategies = [
             StrategyRecord.from_dict(s)
             for s in parsed["strategies_used"]
@@ -146,7 +146,7 @@ class Defender:
             for attr in target_attributes:
                 value = ground_truth.get(attr, by_lower.get(attr.lower()))
                 if value is not None:
-                    result[attr] = str(value)
+                    result[attr] = _stringify_ground_truth_value(value)
             return result
         except Exception:
             # non-fatal — orchestrator can still run without ground truth
@@ -180,6 +180,7 @@ class Defender:
             system_prompt=system_prompt,
             max_output_tokens=self.MAX_TOKENS,
             temperature=0.7,
+            response_mime_type="application/json",
         )
 
 
@@ -208,3 +209,14 @@ def _normalize_clue_map(
             if isinstance(clue, dict)
         ]
     return normalized
+
+
+def _stringify_ground_truth_value(value: object) -> str:
+    """Convert LLM-extracted ground-truth values into readable strings."""
+    if isinstance(value, list):
+        return "; ".join(str(item) for item in value if item is not None)
+    if isinstance(value, dict):
+        return "; ".join(
+            f"{key}: {item}" for key, item in value.items() if item is not None
+        )
+    return str(value)

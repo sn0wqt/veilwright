@@ -1,4 +1,4 @@
-"""Defender — semantic text anonymization agent."""
+"""Defender — semantic anonymization toolkit and adversarial loop."""
 
 from defender.defender import Defender, DefenderError
 from defender.attacker import Attacker, AttackerError
@@ -19,7 +19,8 @@ from defender.types import (
 def run_defender(defender_input: DefenderInput) -> DefenderOutput:
     """Top-level convenience function for the orchestrator.
 
-    Creates a Defender (reads GEMINI_API_KEY from .env) and runs the pipeline.
+    Creates a Defender using credentials from the environment or `.env` file
+    and runs the anonymization pipeline.
     """
     defender = Defender()
     return defender.run(defender_input)

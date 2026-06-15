@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 from defender.utils import (
     _compare_guess_to_ground_truth,
+    _date_tuple,
+    _parse_date_value,
     is_guess_correct,
     parse_llm_json,
     parse_validated_llm_json,
@@ -20,8 +22,13 @@ from defender.types import (
     UtilityInput,
     UtilityOutput,
 )
-from defender.attacker import Attacker, AttackerError
-from defender.defender import Defender, DefenderError, _normalize_clue_map
+from defender.attacker import (
+    Attacker,
+    AttackerError,
+    _build_repair_prompt,
+    _build_system_prompt,
+)
+from defender.defender import Defender, DefenderError, _normalize_clue_map, _stringify_ground_truth_value
 from defender.llm_client import GeminiClient
 from defender.orchestrator import (
     run_adversarial_loop,
@@ -35,7 +42,14 @@ from defender.prompts import (
     build_rewrite_prompt,
     build_utility_prompt,
 )
-from defender.scanner import PIIMatch, _deduplicate_spans, _is_valid_phone, _luhn_check, scan_text
+from defender.scanner import (
+    PIIMatch,
+    _deduplicate_spans,
+    _is_false_positive_person,
+    _is_valid_phone,
+    _luhn_check,
+    scan_text,
+)
 from defender.strategies import RewriteStrategy, VALID_STRATEGY_NAMES
 from defender.utility import UtilityError, UtilityJudge
 
@@ -60,6 +74,21 @@ class TestUtils(unittest.TestCase):
         self.assertFalse(_compare_guess_to_ground_truth("District 4", "District 9", "Location"))
         self.assertFalse(_compare_guess_to_ground_truth("London", "Paris"))
         self.assertFalse(_compare_guess_to_ground_truth("1990", "2000"))
+
+        # Name / Identity matching tests
+        self.assertTrue(_compare_guess_to_ground_truth("Barack Obama", "Barack Hussein Obama", "Identity"))
+        self.assertTrue(_compare_guess_to_ground_truth("Neil Armstrong", "Neil A. Armstrong", "Referenced Person"))
+        self.assertTrue(_compare_guess_to_ground_truth("Obama", "Barack Obama", "Identity"))
+        self.assertFalse(_compare_guess_to_ground_truth("Obama", "John McCain", "Identity"))
+
+        # Date matching tests
+        self.assertTrue(_compare_guess_to_ground_truth("August 4, 1961", "4 August 1961", "Birth Date"))
+        self.assertTrue(_compare_guess_to_ground_truth("August 4, 1961", "04.08.1961", "Birth Date"))
+        self.assertTrue(_compare_guess_to_ground_truth("4 Aug 1961", "04.08.1961", "Birth Date"))
+        self.assertTrue(_compare_guess_to_ground_truth("January 15, 2024", "01/15/2024", "Event Date"))
+        self.assertFalse(_compare_guess_to_ground_truth("August 4, 1961", "August 4, 1980", "Birth Date"))
+        self.assertFalse(_compare_guess_to_ground_truth("August 4, 1980", "04.08.1961", "Birth Date"))
+        self.assertFalse(_compare_guess_to_ground_truth("August 4, 1961", "August 1961", "Birth Date"))
 
     def test_compare_guess_year_boundary(self) -> None:
         """Birth year tolerance is 5 — exactly 5 apart should match, 6 should not."""
@@ -193,6 +222,10 @@ class TestUtils(unittest.TestCase):
         result = parse_llm_json('```json\n{"key": "value"}\n```')
         self.assertEqual(result, {"key": "value"})
 
+    def test_parse_llm_json_string_wrapped_object(self) -> None:
+        result = parse_llm_json('"{\\"key\\": \\"value\\"}"')
+        self.assertEqual(result, {"key": "value"})
+
     def test_parse_llm_json_surrounding_text(self) -> None:
         result = parse_llm_json('Here is the result: {"key": "value"} hope that helps!')
         self.assertEqual(result, {"key": "value"})
@@ -280,6 +313,16 @@ class TestScanner(unittest.TestCase):
         self.assertTrue(len(date_matches) > 0)
         # Dates should NOT be masked
         self.assertIn("2024-01-15", result.masked_text)
+
+    def test_scan_text_does_not_mask_the_moon_as_person(self) -> None:
+        result = scan_text("The astronaut walked on the Moon.")
+        self.assertIn("the Moon", result.masked_text)
+        self.assertNotIn("<PERSON>", result.masked_text)
+
+    def test_false_positive_person_filter_keeps_real_names(self) -> None:
+        text = "Neil Armstrong walked on the Moon."
+        self.assertFalse(_is_false_positive_person("Neil Armstrong", text, 0))
+        self.assertTrue(_is_false_positive_person("Moon", text, text.index("Moon")))
 
     def test_luhn_check_valid(self) -> None:
         self.assertTrue(_luhn_check("4111111111111111"))
@@ -442,6 +485,22 @@ class TestDefender(unittest.TestCase):
         self.assertIn("Include financial attributes such as income", prompt)
         self.assertIn("earns $300,000 annually", prompt)
 
+    def test_extract_ground_truth_stringifies_list_values_readably(self) -> None:
+        defender = Defender(api_key="fake_key")
+        defender._call_llm = MagicMock(
+            return_value=(
+                '{"ground_truth": {"Political Office": '
+                '["president", "senator"]}}'
+            )
+        )
+
+        result = defender.extract_ground_truth(
+            "A person served as president and senator.",
+            ["Political Office"],
+        )
+
+        self.assertEqual(result["Political Office"], "president; senator")
+
     def test_run_does_not_mutate_input_ground_truth(self) -> None:
         defender = Defender(api_key="fake_key")
         defender.extract_ground_truth = MagicMock(return_value={"Age": "46"})
@@ -562,6 +621,31 @@ class TestAttacker(unittest.TestCase):
         self.assertIn("confidence.Age", joined)
         self.assertIn("unknown attribute", joined)
 
+    def test_attacker_uses_final_repair_after_retry_parse_failure(self) -> None:
+        attacker = Attacker(api_key="fake_key")
+        attacker._call_llm = MagicMock(
+            side_effect=[
+                "not json",
+                "still not json",
+                """
+                {
+                  "guesses": {"Age": "UNKNOWN"},
+                  "reasoning": {"Age": "No age clues remain."},
+                  "confidence": {"Age": 0.0},
+                  "successful_attributes": []
+                }
+                """,
+            ]
+        )
+
+        output = attacker.run("A person remembers a vague event.", ["Age"])
+
+        self.assertEqual(output.guesses["Age"], "UNKNOWN")
+        self.assertEqual(output.confidence["Age"], 0.0)
+        self.assertEqual(output.successful_attributes, [])
+        self.assertEqual(attacker._call_llm.call_count, 3)
+        self.assertEqual(attacker._call_llm.call_args.kwargs["temperature"], 0.0)
+
 
 class TestUtilityJudge(unittest.TestCase):
     def test_score_rejects_empty_texts(self) -> None:
@@ -623,6 +707,45 @@ class TestGeminiClient(unittest.TestCase):
         self.assertEqual(primary.models.generate_content.call_count, 1)
         self.assertEqual(fallback.models.generate_content.call_count, 2)
         mock_exists.assert_called()
+
+    @patch.dict("os.environ", {"GEMINI_API_KEY": "studio-key"}, clear=True)
+    @patch("defender.llm_client.genai.Client")
+    def test_retries_empty_response(self, mock_client_cls: MagicMock) -> None:
+        class DummyError(Exception):
+            """Test-specific Gemini wrapper error."""
+
+        client_obj = MagicMock()
+        empty_response = MagicMock()
+        empty_response.text = ""
+        ok_response = MagicMock()
+        ok_response.text = '{"ok": true}'
+        client_obj.models.generate_content.side_effect = [
+            empty_response,
+            empty_response,
+            empty_response,
+            ok_response,
+        ]
+        mock_client_cls.return_value = client_obj
+
+        client = GeminiClient(
+            model="gemini-test",
+            label="test",
+            error_type=DummyError,
+        )
+
+        self.assertEqual(
+            client.generate(
+                ["prompt"],
+                "system",
+                128,
+                0.0,
+                response_mime_type="application/json",
+            ),
+            '{"ok": true}',
+        )
+        self.assertEqual(client_obj.models.generate_content.call_count, 4)
+        config = client_obj.models.generate_content.call_args.kwargs["config"]
+        self.assertEqual(config["response_mime_type"], "application/json")
 
 
 class TestOrchestrator(unittest.TestCase):
@@ -1164,6 +1287,8 @@ class TestPrompts(unittest.TestCase):
         prompt = build_utility_prompt("orig", "rewritten", ["Age"])
         self.assertIn("Age", prompt)
         self.assertNotIn("none provided", prompt)
+        self.assertNotIn('"score": 0.75', prompt)
+        self.assertIn("do not choose a default midpoint", prompt)
 
     def test_build_clue_enumeration_prompt(self) -> None:
         prompt = build_clue_enumeration_prompt("Some text", ["Age"])
@@ -1176,3 +1301,332 @@ class TestPrompts(unittest.TestCase):
         self.assertIn("Some text", prompt)
         self.assertIn("Age", prompt)
         self.assertIn("ground_truth", prompt)
+
+
+class TestVerifierTokenMatching(unittest.TestCase):
+    """Tests for the expanded verifier matching: event/figure attributes and overmatching prevention."""
+
+    def test_event_attribute_token_matching(self) -> None:
+        """'moon landing' matches 'Apollo 11 moon landing' for Exact Event."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth("moon landing", "Apollo 11 moon landing", "Exact Event")
+        )
+
+    def test_event_attribute_disjoint_no_match(self) -> None:
+        """Disjoint event guesses should not match."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth("Gemini program", "Apollo 11 moon landing", "Exact Event")
+        )
+
+    def test_figure_attribute_matching(self) -> None:
+        """'figure' keyword triggers token-subset matching."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth("Neil Armstrong", "Neil Alden Armstrong", "Public Figure")
+        )
+
+    def test_no_general_fallback_for_generic_attributes(self) -> None:
+        """Without a name/identity/event keyword, token-subset matching does NOT fire."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth("Barack Obama", "Barack Hussein Obama", "Target")
+        )
+
+    def test_no_overmatch_profession_with_intervening_words(self) -> None:
+        """'software development' should NOT match 'senior software development engineer' for Profession.
+
+        Substring matching does not fire here because 'software development' is not
+        contiguous in 'senior software development engineer'. Without the general
+        fallback, this correctly returns False.
+        """
+        self.assertFalse(
+            _compare_guess_to_ground_truth(
+                "software engineering", "senior software development engineer", "Profession"
+            )
+        )
+
+    def test_no_broad_substring_match_for_generic_attributes(self) -> None:
+        """Generic attributes do not get broad substring matching."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth("New York", "New York City Police Department", "Employer")
+        )
+
+    def test_location_allows_partial_place_match(self) -> None:
+        """Location-like attributes can match a contained place name."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth("New York", "New York City", "Location")
+        )
+
+    def test_role_allows_single_token_title_match(self) -> None:
+        """Role-like attributes can match a specific title token."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth(
+                "President",
+                "President of the United States",
+                "Political Office",
+            )
+        )
+
+    def test_role_allows_head_of_state_alias(self) -> None:
+        """A national head of state guess is a presidential-office leak."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth(
+                "National Head of State",
+                "44th president of the United States",
+                "Political Office",
+            )
+        )
+
+    def test_role_allows_legislator_senator_alias(self) -> None:
+        """Legislator and senator are close enough for office/profession leakage."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth(
+                "national legislator",
+                "U.S. senator representing Illinois",
+                "Political Office",
+            )
+        )
+
+    def test_profession_allows_public_servant_politician_alias(self) -> None:
+        """Public servant is a meaningful profession leak for politician."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth(
+                "public servant",
+                "politician",
+                "Profession",
+            )
+        )
+
+    def test_role_rejects_context_without_title(self) -> None:
+        """Role-like attributes should not match surrounding context only."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth(
+                "United States",
+                "President of the United States",
+                "Political Office",
+            )
+        )
+
+    def test_financial_attribute_matches_same_amount_in_phrase(self) -> None:
+        """Financial values match when the same standalone amount appears."""
+        self.assertTrue(
+            _compare_guess_to_ground_truth("$300,000+", "$300,000 annually", "Income")
+        )
+
+    def test_no_fallback_for_unrelated_multi_word_profession(self) -> None:
+        """'data science' should NOT match 'data center operations manager' for Profession."""
+        self.assertFalse(
+            _compare_guess_to_ground_truth("data science", "data center operations manager", "Profession")
+        )
+
+
+class TestParseDateValue(unittest.TestCase):
+    """Direct tests for _parse_date_value."""
+
+    def test_iso_format(self) -> None:
+        self.assertEqual(_parse_date_value("2024-01-15"), (2024, 1, 15))
+
+    def test_us_format(self) -> None:
+        self.assertEqual(_parse_date_value("01/15/2024"), (2024, 1, 15))
+
+    def test_month_name_first(self) -> None:
+        self.assertEqual(_parse_date_value("August 4, 1961"), (1961, 8, 4))
+
+    def test_day_month_name_year(self) -> None:
+        self.assertEqual(_parse_date_value("4 August 1961"), (1961, 8, 4))
+
+    def test_dot_separated(self) -> None:
+        self.assertEqual(_parse_date_value("04.08.1961"), (1961, 8, 4))
+
+    def test_abbreviated_month(self) -> None:
+        self.assertEqual(_parse_date_value("4 Aug 1961"), (1961, 8, 4))
+
+    def test_no_date_returns_none(self) -> None:
+        self.assertIsNone(_parse_date_value("hello world"))
+
+    def test_partial_date_returns_none(self) -> None:
+        self.assertIsNone(_parse_date_value("August 1961"))
+
+
+class TestDateTuple(unittest.TestCase):
+    """Direct tests for _date_tuple validation."""
+
+    def test_valid_date(self) -> None:
+        self.assertEqual(_date_tuple(2024, 1, 15), (2024, 1, 15))
+
+    def test_invalid_month(self) -> None:
+        self.assertIsNone(_date_tuple(2024, 13, 1))
+
+    def test_invalid_day(self) -> None:
+        self.assertIsNone(_date_tuple(2024, 1, 0))
+
+    def test_year_too_low(self) -> None:
+        self.assertIsNone(_date_tuple(999, 1, 1))
+
+
+class TestStringifyGroundTruthValue(unittest.TestCase):
+    """Tests for _stringify_ground_truth_value."""
+
+    def test_string_passthrough(self) -> None:
+        self.assertEqual(_stringify_ground_truth_value("hello"), "hello")
+
+    def test_list_values(self) -> None:
+        self.assertEqual(
+            _stringify_ground_truth_value(["president", "senator"]),
+            "president; senator",
+        )
+
+    def test_list_with_none(self) -> None:
+        self.assertEqual(
+            _stringify_ground_truth_value(["president", None, "senator"]),
+            "president; senator",
+        )
+
+    def test_dict_values(self) -> None:
+        result = _stringify_ground_truth_value({"office": "president", "term": "2009"})
+        self.assertIn("office: president", result)
+        self.assertIn("term: 2009", result)
+
+    def test_dict_with_none(self) -> None:
+        result = _stringify_ground_truth_value({"office": "president", "term": None})
+        self.assertIn("office: president", result)
+        self.assertNotIn("term", result)
+
+    def test_numeric_value(self) -> None:
+        self.assertEqual(_stringify_ground_truth_value(42), "42")
+
+
+class TestIterationFeedbackFallthrough(unittest.TestCase):
+    """Test the unreachable-from-loop fallthrough branch in _build_iteration_feedback."""
+
+    def test_attacker_failed_utility_pass_returns_attacker_feedback(self) -> None:
+        """When attacker fails and utility passes, returns plain attacker feedback.
+
+        This branch is unreachable from run_adversarial_loop (which exits early)
+        but exists for standalone callers.
+        """
+        attacker_output = AttackerOutput(
+            guesses={"Age": "UNKNOWN"},
+            reasoning={"Age": "No clues"},
+            confidence={"Age": 0.1},
+            successful_attributes=[],
+        )
+        feedback = _build_iteration_feedback(attacker_output, 0.9, 0.75, True)
+        self.assertIn("unable to guess", feedback)
+        self.assertNotIn("utility", feedback.lower())
+        self.assertNotIn("Privacy goal", feedback)
+
+
+class TestGeminiClientEdgeCases(unittest.TestCase):
+    """Edge case tests for GeminiClient."""
+
+    @patch.dict("os.environ", {"GEMINI_API_KEY": "studio-key"}, clear=True)
+    @patch("defender.llm_client.genai.Client")
+    def test_empty_response_exhaustion_raises(self, mock_client_cls: MagicMock) -> None:
+        """After EMPTY_RESPONSE_ATTEMPTS empty responses, raises error."""
+
+        class DummyError(Exception):
+            pass
+
+        client_obj = MagicMock()
+        empty_response = MagicMock()
+        empty_response.text = ""
+        client_obj.models.generate_content.return_value = empty_response
+        mock_client_cls.return_value = client_obj
+
+        client = GeminiClient(
+            model="gemini-test", label="test", error_type=DummyError
+        )
+
+        with self.assertRaises(DummyError) as ctx:
+            client.generate(["prompt"], "system", 128, 0.0)
+
+        self.assertIn("empty response", str(ctx.exception))
+        self.assertEqual(
+            client_obj.models.generate_content.call_count,
+            GeminiClient.EMPTY_RESPONSE_ATTEMPTS,
+        )
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_no_credentials_raises(self) -> None:
+        """GeminiClient raises when no credentials are available."""
+
+        class DummyError(Exception):
+            pass
+
+        with self.assertRaises(DummyError) as ctx:
+            GeminiClient(
+                model="gemini-test", label="test", error_type=DummyError
+            )
+
+        self.assertIn("No credentials found", str(ctx.exception))
+
+
+class TestBuildRepairPrompt(unittest.TestCase):
+    """Tests for the attacker _build_repair_prompt."""
+
+    def test_system_prompt_discourages_unknown_overuse(self) -> None:
+        prompt = _build_system_prompt(0.7)
+        self.assertIn("best-effort guess", prompt)
+        self.assertIn('Do not', prompt)
+        self.assertIn('overuse "UNKNOWN"', prompt)
+        self.assertIn("lower confidence", prompt)
+        self.assertIn("confidence of 0.0", prompt)
+
+    def test_repair_prompt_contains_required_fields(self) -> None:
+        prompt = _build_repair_prompt(
+            rewritten_text="Some anonymized text.",
+            target_attributes=["Age", "Location"],
+            confidence_threshold=0.7,
+            previous_error="JSON parse error",
+        )
+        self.assertIn("Some anonymized text.", prompt)
+        self.assertIn("Age", prompt)
+        self.assertIn("Location", prompt)
+        self.assertIn("JSON parse error", prompt)
+        self.assertIn("0.70", prompt)
+        self.assertIn("guesses", prompt)
+        self.assertIn("reasoning", prompt)
+        self.assertIn("confidence", prompt)
+        self.assertIn("successful_attributes", prompt)
+
+
+class TestAttackerMissingAttributeBackfill(unittest.TestCase):
+    """Test that the Attacker backfills missing attributes with UNKNOWN."""
+
+    def test_missing_attributes_backfilled(self) -> None:
+        attacker = Attacker(api_key="fake_key")
+        # Provide a valid, complete response for both attributes, but
+        # simulate a case where the LLM puts UNKNOWN for Location and
+        # confidence below threshold so it's not in successful_attributes.
+        valid_response = json.dumps({
+            "guesses": {"Age": "46", "Location": "UNKNOWN"},
+            "reasoning": {"Age": "clue", "Location": "No location clues."},
+            "confidence": {"Age": 0.8, "Location": 0.0},
+            "successful_attributes": ["Age"],
+        })
+        attacker._call_llm = MagicMock(return_value=valid_response)
+
+        output = attacker.run("Rewritten text", ["Age", "Location"])
+
+        self.assertEqual(output.guesses["Location"], "UNKNOWN")
+        self.assertEqual(output.confidence["Location"], 0.0)
+        # Location should NOT be in successful_attributes
+        self.assertNotIn("Location", output.successful_attributes)
+        # Age should be there
+        self.assertEqual(output.guesses["Age"], "46")
+        self.assertIn("Age", output.successful_attributes)
+
+    def test_unknown_confidence_is_normalized_to_zero(self) -> None:
+        attacker = Attacker(api_key="fake_key")
+        valid_response = json.dumps({
+            "guesses": {"Identity": "UNKNOWN"},
+            "reasoning": {"Identity": "No identifying clues remain."},
+            "confidence": {"Identity": 1.0},
+            "successful_attributes": ["Identity"],
+        })
+        attacker._call_llm = MagicMock(return_value=valid_response)
+
+        output = attacker.run("A vague rewritten text.", ["Identity"])
+
+        self.assertEqual(output.guesses["Identity"], "UNKNOWN")
+        self.assertEqual(output.confidence["Identity"], 0.0)
+        self.assertEqual(output.successful_attributes, [])

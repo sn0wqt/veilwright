@@ -38,6 +38,7 @@ htmlcov/
 coverage.xml
 
 # Misc
+*.zip
 *.db
 *.sqlite3
 CLAUDE.md

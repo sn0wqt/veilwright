@@ -1,4 +1,4 @@
-"""CLI entry point for the Defender agent."""
+"""CLI entry point for the Defender semantic anonymization toolkit."""
 
 import json
 import os
@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from defender.defender import Defender, DefenderError
-from defender.attacker import AttackerError
+from defender.attacker import Attacker, AttackerError
 from defender.utility import UtilityError
 from defender.orchestrator import run_adversarial_loop
 from defender.types import DefenderInput, DefenderOutput, AdversarialResult
@@ -24,7 +24,7 @@ load_dotenv()
 
 app = typer.Typer(
     name="defender",
-    help="Defender agent — semantic text anonymization for adversarial PII protection.",
+    help="Adversarial multi-agent semantic anonymization system (Defender, Attacker, Utility Judge).",
     add_completion=False,
 )
 console = Console()
@@ -171,7 +171,7 @@ def defend(
         help="Show all detected PII entities, not just masked ones.",
     ),
 ) -> None:
-    """Run the Defender agent on the given text and target attributes."""
+    """Run the Defender agent to anonymize target attributes in a single pass."""
 
     resolved_text = _resolve_text_input(text, file)
     attr_list = _parse_attributes(attributes)
@@ -227,9 +227,6 @@ def defend(
             raise typer.Exit(code=1)
 
 
-# ---------------------------------------------------------------------------
-# Output formatting
-# ---------------------------------------------------------------------------
 
 def _format_txt_block(result: DefenderOutput, iteration: int, total: int) -> str:
     """Format one iteration as a plain-text block for the output file."""
@@ -238,14 +235,14 @@ def _format_txt_block(result: DefenderOutput, iteration: int, total: int) -> str
     lines.append(f"=== Iteration {iteration}/{total} ===")
     lines.append("")
 
-    # ground truth — present on every iteration since it's carried forward
+    # ground truth - present on every iteration since it's carried forward
     if result.ground_truth:
         lines.append("Ground Truth:")
         for attr, val in result.ground_truth.items():
             lines.append(f"  {attr}: {val}")
         lines.append("")
 
-    # clue map — only populated on iteration 1 (pre-pass doesn't re-run on retries)
+    # clue map - only populated on iteration 1 (pre-pass doesn't re-run on retries)
     if result.clue_map:
         lines.append("Identified Clues:")
         for attr, clues in result.clue_map.items():
@@ -314,7 +311,7 @@ def adversarial_loop(
         help="Gemini model to use for the Defender.",
     ),
     attacker_model: str = typer.Option(
-        "gemini-3-flash-preview",
+        Attacker.DEFAULT_MODEL,
         "--attacker-model",
         help="Gemini model to use for the Attacker.",
     ),
@@ -460,7 +457,7 @@ def _pretty_print_adversarial(result: AdversarialResult, verbose: bool = False) 
     ]
 
     if result.ground_truth:
-        summary_lines.append("\n[bold]Ground Truth Protected attributes:[/bold]")
+        summary_lines.append("\n[bold]Ground Truth Protected Attributes:[/bold]")
         for k, v in result.ground_truth.items():
             summary_lines.append(f"  - {k}: {v}")
 
@@ -526,7 +523,7 @@ def _pretty_print(
 
         if pii_to_show:
             pii_table = Table(
-                title="PII Detected by Scanner (NER + Regex)",
+                title="PII Detected by Scanner",
                 show_header=True,
                 header_style="bold magenta",
             )

@@ -189,7 +189,8 @@ def _build_iteration_feedback(
             "On the next iteration, focus on PRESERVING the narrative structure, "
             "relationships, and non-identifying details while keeping the target "
             "attributes hidden. Do NOT apply heavier anonymization — the privacy "
-            "is already sufficient."
+            "is already sufficient. Do NOT restore original target-revealing "
+            "clues, known inference chains, or equivalent paraphrases."
         )
 
     if attacker_succeeded and not utility_pass:

@@ -1,7 +1,11 @@
 """Utility Judge for scoring meaning preservation."""
 
 from defender.llm_client import GeminiClient
-from defender.prompts import UTILITY_SYSTEM_PROMPT, UTILITY_RETRY_PROMPT, build_utility_prompt
+from defender.prompts import (
+    UTILITY_RETRY_PROMPT,
+    UTILITY_SYSTEM_PROMPT,
+    build_utility_prompt,
+)
 from defender.types import UtilityInput, UtilityOutput
 from defender.utils import parse_validated_llm_json, validate_utility_response
 
@@ -66,4 +70,5 @@ class UtilityJudge:
             system_prompt=UTILITY_SYSTEM_PROMPT,
             max_output_tokens=self.MAX_TOKENS,
             temperature=0.2,
+            response_mime_type="application/json",
         )

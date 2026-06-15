@@ -1,8 +1,8 @@
 """Syntactic PII scanner for the Defender agent.
 
 Two-pass detection:
-  1. spaCy NER — detects names, locations, orgs, money (reported but NOT masked,
-     so the LLM can see them and reason about how to rewrite them)
+  1. Optional spaCy NER — detects names, locations, orgs, money (reported but
+     NOT masked, so the LLM can see them and reason about how to rewrite them)
   2. Regex — detects emails, phones, dates, credit cards. Emails, phones,
      and credit cards are masked before LLM calls; dates are detected but
      left visible for semantic rewriting.
@@ -16,11 +16,18 @@ try:
 except ImportError:
     phonenumbers = None
 
-# load spaCy model (with graceful fallback)
+# Load the best installed spaCy model, with graceful regex-only fallback.
 try:
     import spacy
-    _nlp = spacy.load("en_core_web_lg")
-except (ImportError, OSError):
+
+    _nlp = None
+    for _model_name in ("en_core_web_lg", "en_core_web_sm"):
+        try:
+            _nlp = spacy.load(_model_name)
+            break
+        except OSError:
+            continue
+except ImportError:
     _nlp = None
 
 
@@ -85,6 +92,8 @@ _NER_LABEL_MAP: dict[str, tuple[str, str]] = {
     "DATE":    ("DATE", "<DATE>"),
 }
 
+_CELESTIAL_PERSON_FALSE_POSITIVES = {"moon", "sun", "earth"}
+
 
 # ---------------------------------------------------------------------------
 # Validation helpers
@@ -120,6 +129,16 @@ def _is_valid_phone(value: str) -> bool:
             return False
 
 
+def _is_false_positive_person(value: str, text: str, start: int) -> bool:
+    """Return True for common non-person terms spaCy can label as PERSON."""
+    normalized = value.strip().lower()
+    if normalized not in _CELESTIAL_PERSON_FALSE_POSITIVES:
+        return False
+
+    prefix = text[max(0, start - 5):start].lower()
+    return prefix.endswith("the ")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -139,6 +158,12 @@ def scan_text(text: str) -> ScanResult:
         doc = _nlp(text)
         for ent in doc.ents:
             if ent.label_ in _NER_LABEL_MAP:
+                if ent.label_ == "PERSON" and _is_false_positive_person(
+                    ent.text,
+                    text,
+                    ent.start_char,
+                ):
+                    continue
                 pii_type, replacement = _NER_LABEL_MAP[ent.label_]
                 # PERSON gets masked (direct identifier), others are detect-only
                 should_mask = ent.label_ == "PERSON"
