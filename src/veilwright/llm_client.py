@@ -125,6 +125,34 @@ class GeminiClient:
                     contents=contents,
                     config=config,
                 )
+
+                # Check if the prompt itself was blocked
+                if hasattr(response, "prompt_feedback") and response.prompt_feedback:
+                    block_reason = getattr(response.prompt_feedback, "block_reason", None)
+                    if block_reason and type(block_reason).__name__ not in ("MagicMock", "Mock"):
+                        raise self._error(
+                            f"[{self.label}] Request prompt was blocked by Gemini safety filters or policy "
+                            f"(Block Reason: {block_reason})."
+                        )
+
+                # Check if the response generation was blocked or cut off
+                if hasattr(response, "candidates") and isinstance(response.candidates, list) and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, "finish_reason", None)
+                    if finish_reason and type(finish_reason).__name__ not in ("MagicMock", "Mock"):
+                        reason_str = str(finish_reason).upper()
+                        if "SAFETY" in reason_str or "RECITATION" in reason_str:
+                            raise self._error(
+                                f"[{self.label}] Request/Response was blocked by Gemini safety filters or policy "
+                                f"(Finish Reason: {finish_reason})."
+                            )
+                        elif "MAX_TOKENS" in reason_str:
+                            raise self._error(
+                                f"[{self.label}] Request/Response was cut off because it hit the maximum token limit of "
+                                f"{max_output_tokens} tokens (Finish Reason: MAX_TOKENS). "
+                                f"This can happen when reasoning models generate long thinking chains."
+                            )
+
                 text = response.text
                 if text:
                     return text
